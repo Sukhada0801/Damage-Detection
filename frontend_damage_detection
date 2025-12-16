@@ -1,0 +1,1616 @@
+"""
+Flask Web Application for Vehicle Damage Detection
+==================================================
+This web application provides a user-friendly interface for uploading
+vehicle images/videos and receiving damage analysis reports.
+"""
+
+from flask import Flask, render_template_string, request, jsonify, send_file
+from flask_cors import CORS
+import os
+import sys
+import tempfile
+import json
+from pathlib import Path
+from datetime import datetime
+import base64
+try:
+    import cv2
+    CV2_AVAILABLE = True
+except ImportError:
+    CV2_AVAILABLE = False
+
+# Import backend functions from the main script
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from openai_gpt_vision import (
+    analyze_vehicle_damage,
+    is_video_file,
+    encode_image,
+    get_mime_type
+)
+from dummy_database import dummy_db, get_estimate
+
+app = Flask(__name__)
+CORS(app)
+
+# Configuration
+UPLOAD_FOLDER = 'uploads'
+HUMAN_ANNOTATIONS_FOLDER = os.path.join(UPLOAD_FOLDER, 'human_annotations')
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'webp', 'mp4', 'avi', 'mov', 'mkv', 'wmv', 'webm', 'm4v'}
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
+
+# Create folders if they don't exist
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(HUMAN_ANNOTATIONS_FOLDER, exist_ok=True)
+
+def allowed_file(filename):
+    """Check if file extension is allowed."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def parse_damage_report(report_text):
+    """Parse the damage report text into structured data."""
+    damages = []
+    
+    if "NO DAMAGE DETECTED" in report_text.upper() or "DAMAGE FOUND: NO" in report_text.upper():
+        return {
+            'damage_found': False,
+            'damages': []
+        }
+    
+    # Split by damage markers
+    lines = report_text.split('\n')
+    current_damage = {}
+    
+    for line in lines:
+        line = line.strip()
+        if line.startswith('DAMAGE') and ':' in line:
+            if current_damage:
+                damages.append(current_damage)
+            current_damage = {'id': len(damages) + 1}
+        elif line.startswith('- Location:'):
+            current_damage['location'] = line.replace('- Location:', '').strip()
+        elif line.startswith('- Type:'):
+            current_damage['type'] = line.replace('- Type:', '').strip()
+        elif line.startswith('- Extent:'):
+            extent = line.replace('- Extent:', '').strip()
+            current_damage['severity'] = extent
+            current_damage['extent'] = extent
+    
+    if current_damage:
+        damages.append(current_damage)
+    
+    return {
+        'damage_found': len(damages) > 0,
+        'damages': damages,
+        'raw_report': report_text
+    }
+
+# HTML Template
+HTML_TEMPLATE = '''
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Vehicle Damage Detection System</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+            position: relative;
+        }
+
+        .logo-container {
+            margin-bottom: 20px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+
+        .logo {
+            max-height: 80px;
+            max-width: 300px;
+            height: auto;
+            width: auto;
+            object-fit: contain;
+            filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.2));
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .header p {
+            font-size: 1.1em;
+            opacity: 0.9;
+        }
+
+        .content {
+            padding: 40px;
+        }
+
+        .upload-section {
+            border: 3px dashed #667eea;
+            border-radius: 15px;
+            padding: 40px;
+            text-align: center;
+            background: #f8f9ff;
+            transition: all 0.3s ease;
+            margin-bottom: 30px;
+        }
+
+        .upload-section:hover {
+            border-color: #764ba2;
+            background: #f0f2ff;
+        }
+
+        .upload-section.dragover {
+            border-color: #764ba2;
+            background: #e8ebff;
+            transform: scale(1.02);
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            margin: 20px 0;
+        }
+
+        .file-input {
+            position: absolute;
+            opacity: 0;
+            width: 100%;
+            height: 100%;
+            cursor: pointer;
+        }
+
+        .file-input-label {
+            display: inline-block;
+            padding: 15px 40px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 50px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+        }
+
+        .file-input-label:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+
+        .file-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .file-info.show {
+            display: block;
+        }
+
+        .file-name {
+            font-weight: 600;
+            color: #333;
+            margin-bottom: 5px;
+        }
+
+        .file-size {
+            color: #666;
+            font-size: 0.9em;
+        }
+
+        .analyze-btn {
+            padding: 15px 50px;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            font-size: 1.2em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(102, 126, 234, 0.4);
+            margin-top: 20px;
+            display: none;
+        }
+
+        .analyze-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(102, 126, 234, 0.6);
+        }
+
+        .analyze-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+        }
+
+        .loading.show {
+            display: block;
+        }
+
+        .spinner {
+            border: 4px solid #f3f3f3;
+            border-top: 4px solid #667eea;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .results-section {
+            display: none;
+            margin-top: 30px;
+        }
+
+        .results-section.show {
+            display: block;
+        }
+
+        .results-header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 15px 15px 0 0;
+        }
+
+        .results-header h2 {
+            font-size: 1.8em;
+            margin-bottom: 10px;
+            color: white;
+        }
+
+        .preview-image {
+            width: 100%;
+            max-width: 900px;
+            border-radius: 10px;
+            margin: 20px auto;
+            display: block;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2);
+            cursor: pointer;
+            transition: transform 0.3s ease;
+        }
+
+        .preview-image:hover {
+            transform: scale(1.02);
+        }
+
+        .damage-summary {
+            background: #f8f9ff;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+        }
+
+        .no-damage {
+            text-align: center;
+            padding: 40px;
+            background: #d4edda;
+            color: #155724;
+            border-radius: 10px;
+            font-size: 1.2em;
+        }
+
+        .damages-list {
+            display: grid;
+            gap: 20px;
+            margin-top: 20px;
+        }
+
+        .damage-card {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            box-shadow: 0 4px 15px rgba(0, 0, 0, 0.1);
+            border-left: 5px solid;
+            transition: transform 0.3s ease;
+            color: #333;
+        }
+
+        .damage-card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 6px 20px rgba(0, 0, 0, 0.15);
+        }
+
+        .damage-card.severe {
+            border-left-color: #dc3545;
+        }
+
+        .damage-card.moderate {
+            border-left-color: #fd7e14;
+        }
+
+        .damage-card.minor {
+            border-left-color: #ffc107;
+        }
+
+        .damage-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+
+        .damage-number {
+            background: #667eea;
+            color: white;
+            width: 35px;
+            height: 35px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+        }
+
+        .severity-badge {
+            padding: 8px 20px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 0.9em;
+            text-transform: uppercase;
+        }
+
+        .severity-badge.severe {
+            background: #dc3545;
+            color: white;
+        }
+
+        .severity-badge.moderate {
+            background: #fd7e14;
+            color: white;
+        }
+
+        .severity-badge.minor {
+            background: #ffc107;
+            color: #333;
+        }
+
+        .damage-info {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 15px;
+        }
+
+        .info-item {
+            background: #f8f9ff;
+            padding: 12px;
+            border-radius: 8px;
+        }
+
+        .info-label {
+            font-size: 0.85em;
+            color: #666;
+            margin-bottom: 5px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .info-value {
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #333;
+        }
+
+        .error-message {
+            background: #f8d7da;
+            color: #721c24;
+            padding: 20px;
+            border-radius: 10px;
+            margin: 20px 0;
+            border-left: 5px solid #dc3545;
+        }
+
+        .raw-report {
+            background: #f8f9ff;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            white-space: pre-wrap;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+
+        .raw-report-header {
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: #667eea;
+            cursor: pointer;
+            user-select: none;
+        }
+
+        .raw-report-content {
+            display: none;
+        }
+
+        .raw-report-content.show {
+            display: block;
+        }
+
+        @media (max-width: 768px) {
+            .header h1 {
+                font-size: 1.8em;
+            }
+
+            .content {
+                padding: 20px;
+            }
+
+            .upload-section {
+                padding: 20px;
+            }
+
+            .damage-info {
+                grid-template-columns: 1fr;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <div class="logo-container">
+                <img src="/api/logo" alt="Algotropic Logo" class="logo">
+            </div>
+            <h1>🚗 Vehicle Damage Detection</h1>
+            <p>AI-Powered Insurance Assessment System</p>
+        </div>
+
+        <div class="content">
+            <div class="upload-section" id="uploadSection">
+                <h2 style="margin-bottom: 20px; color: #333;">Upload Vehicle Image or Video</h2>
+                <p style="color: #666; margin-bottom: 30px;">
+                    Drag and drop your file here, or click to browse
+                </p>
+                <div class="file-input-wrapper">
+                    <input type="file" id="fileInput" class="file-input" accept="image/*,video/*">
+                    <label for="fileInput" class="file-input-label">
+                        📁 Choose File
+                    </label>
+                </div>
+                <div class="file-info" id="fileInfo">
+                    <div class="file-name" id="fileName"></div>
+                    <div class="file-size" id="fileSize"></div>
+                </div>
+                <div style="margin-top: 25px; padding: 20px; background: #f8f9ff; border-radius: 10px; display: none;" id="vehicleInfoSection">
+                    <h3 style="margin-bottom: 15px; color: #333; font-size: 1.1em;">Vehicle Information (Optional - for cost estimation)</h3>
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px;">
+                        <div>
+                            <label style="display: block; margin-bottom: 5px; color: #666; font-size: 0.9em;">Make</label>
+                            <select id="vehicleMake" style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 8px; font-size: 1em; background: white; cursor: pointer;">
+                                <option value="">Select Make</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display: block; margin-bottom: 5px; color: #666; font-size: 0.9em;">Year</label>
+                            <select id="vehicleYear" style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 8px; font-size: 1em; background: white; cursor: pointer;">
+                                <option value="">Select Year</option>
+                            </select>
+                        </div>
+                        <div>
+                            <label style="display: block; margin-bottom: 5px; color: #666; font-size: 0.9em;">Variant/Model</label>
+                            <select id="vehicleVariant" style="width: 100%; padding: 10px; border: 2px solid #ddd; border-radius: 8px; font-size: 1em; background: white; cursor: pointer;">
+                                <option value="">Select Model</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <button class="analyze-btn" id="analyzeBtn" onclick="analyzeFile()">
+                    🔍 Analyze Damage
+                </button>
+            </div>
+
+            <div class="loading" id="loading">
+                <div class="spinner"></div>
+                <h3>Analyzing vehicle damage...</h3>
+                <p>This may take a few moments</p>
+            </div>
+
+            <div class="results-section" id="resultsSection">
+                <div class="results-header">
+                    <h2>📊 Damage Analysis Results</h2>
+                </div>
+                <div id="resultsContent"></div>
+            </div>
+
+            <!-- Annotation editor overlay (for manual correction) -->
+            <div id="annotationEditorOverlay" style="display:none; position: fixed; inset: 0; background: rgba(0,0,0,0.6); z-index: 9999; justify-content: center; align-items: center;">
+                <div style="background: #ffffff; border-radius: 12px; padding: 20px; max-width: 960px; width: 95%; max-height: 90vh; overflow: auto; box-shadow: 0 10px 30px rgba(0,0,0,0.3); position: relative;">
+                    <button type="button" onclick="closeAnnotationEditor()" aria-label="Close" style="position: absolute; top: 10px; right: 10px; border: none; background: transparent; font-size: 1.3em; cursor: pointer; color: #666;">✕</button>
+                    <h3 style="margin-bottom: 10px; color: #333;">Adjust Annotation (Beta)</h3>
+                    <p style="color: #666; font-size: 0.9em; margin-bottom: 10px;">
+                        Click and drag on the image to draw a new box for the main damaged area. This correction will be saved as feedback to improve future annotations.
+                    </p>
+                    <div style="text-align: center; margin-bottom: 10px;">
+                        <canvas id="annotationCanvas" style="max-width: 100%; border-radius: 8px; border: 1px solid #ddd; background: #000;"></canvas>
+                    </div>
+                    <div style="display: flex; justify-content: flex-end; gap: 10px; margin-top: 10px;">
+                        <button type="button" onclick="closeAnnotationEditor()" style="padding: 8px 18px; border-radius: 20px; border: none; background: #e0e0e0; color: #333; font-weight: 500; cursor: pointer;">Cancel</button>
+                        <button type="button" onclick="saveAnnotationEdits()" style="padding: 8px 18px; border-radius: 20px; border: none; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; font-weight: 600; cursor: pointer;">Save Annotation</button>
+                    </div>
+                    <div id="annotationEditorStatus" style="margin-top: 8px; font-size: 0.85em; color: #666;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const fileInput = document.getElementById('fileInput');
+        const uploadSection = document.getElementById('uploadSection');
+        const fileInfo = document.getElementById('fileInfo');
+        const fileName = document.getElementById('fileName');
+        const fileSize = document.getElementById('fileSize');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+        const loading = document.getElementById('loading');
+        const resultsSection = document.getElementById('resultsSection');
+        const resultsContent = document.getElementById('resultsContent');
+
+        let selectedFile = null;
+        let vehicleData = { makes: [], years: [] };
+        let annotationEditorState = {
+            imageUrl: null,
+            image: null,
+            canvas: null,
+            ctx: null,
+            isDrawing: false,
+            startX: 0,
+            startY: 0,
+            rect: null,
+            imageWidth: 0,
+            imageHeight: 0
+        };
+
+        // Load vehicle data on page load
+        async function loadVehicleData() {
+            try {
+                const response = await fetch('/api/vehicle-data');
+                const data = await response.json();
+                if (data.makes && data.years) {
+                    vehicleData = data;
+                    populateMakeDropdown();
+                }
+            } catch (error) {
+                console.error('Error loading vehicle data:', error);
+            }
+        }
+
+        // Populate Make dropdown
+        function populateMakeDropdown() {
+            const makeSelect = document.getElementById('vehicleMake');
+            makeSelect.innerHTML = '<option value="">Select Make</option>';
+            vehicleData.makes.forEach(make => {
+                const option = document.createElement('option');
+                option.value = make;
+                option.textContent = make;
+                makeSelect.appendChild(option);
+            });
+        }
+
+        // Populate Year dropdown based on selected Make
+        async function populateYearDropdown() {
+            const makeSelect = document.getElementById('vehicleMake');
+            const yearSelect = document.getElementById('vehicleYear');
+            const variantSelect = document.getElementById('vehicleVariant');
+            
+            const selectedMake = makeSelect.value;
+            
+            // Reset year and model dropdowns
+            yearSelect.innerHTML = '<option value="">Select Year</option>';
+            variantSelect.innerHTML = '<option value="">Select Model</option>';
+            
+            if (!selectedMake) {
+                // If no make selected, show all years
+                vehicleData.years.forEach(year => {
+                    const option = document.createElement('option');
+                    option.value = year;
+                    option.textContent = year;
+                    yearSelect.appendChild(option);
+                });
+                return;
+            }
+            
+            // Get years for selected make
+            try {
+                const response = await fetch(`/api/vehicle-years?make=${encodeURIComponent(selectedMake)}`);
+                const data = await response.json();
+                
+                if (data.years && data.years.length > 0) {
+                    data.years.forEach(year => {
+                        const option = document.createElement('option');
+                        option.value = year;
+                        option.textContent = year;
+                        yearSelect.appendChild(option);
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading years:', error);
+                // Fallback: show all years
+                vehicleData.years.forEach(year => {
+                    const option = document.createElement('option');
+                    option.value = year;
+                    option.textContent = year;
+                    yearSelect.appendChild(option);
+                });
+            }
+        }
+
+        // Populate Model dropdown based on selected Make and Year
+        async function populateModelDropdown() {
+            const makeSelect = document.getElementById('vehicleMake');
+            const yearSelect = document.getElementById('vehicleYear');
+            const variantSelect = document.getElementById('vehicleVariant');
+            
+            const selectedMake = makeSelect.value;
+            const selectedYear = yearSelect.value;
+            
+            variantSelect.innerHTML = '<option value="">Select Model</option>';
+            
+            if (!selectedMake) {
+                return;
+            }
+            
+            try {
+                const url = `/api/vehicle-models?make=${encodeURIComponent(selectedMake)}${selectedYear ? '&year=' + encodeURIComponent(selectedYear) : ''}`;
+                const response = await fetch(url);
+                const data = await response.json();
+                
+                if (data.models && data.models.length > 0) {
+                    data.models.forEach(model => {
+                        const option = document.createElement('option');
+                        option.value = model;
+                        option.textContent = model;
+                        variantSelect.appendChild(option);
+                    });
+                }
+            } catch (error) {
+                console.error('Error loading models:', error);
+            }
+        }
+
+        // Event listeners for dropdowns
+        document.getElementById('vehicleMake').addEventListener('change', function() {
+            populateYearDropdown();
+            populateModelDropdown();
+        });
+
+        document.getElementById('vehicleYear').addEventListener('change', function() {
+            populateModelDropdown();
+        });
+
+        // Load vehicle data when page loads
+        loadVehicleData();
+
+        // File input change
+        fileInput.addEventListener('change', function(e) {
+            handleFile(e.target.files[0]);
+        });
+
+        // Drag and drop
+        uploadSection.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            uploadSection.classList.add('dragover');
+        });
+
+        uploadSection.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+        });
+
+        uploadSection.addEventListener('drop', function(e) {
+            e.preventDefault();
+            uploadSection.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) {
+                fileInput.files = e.dataTransfer.files;
+                handleFile(file);
+            }
+        });
+
+        function handleFile(file) {
+            if (!file) return;
+
+            selectedFile = file;
+            fileName.textContent = file.name;
+            fileSize.textContent = formatFileSize(file.size);
+            fileInfo.classList.add('show');
+            const vehicleInfoSection = document.getElementById('vehicleInfoSection');
+            vehicleInfoSection.style.display = 'block';
+            
+            // If vehicle data not loaded yet, load it
+            if (vehicleData.makes.length === 0) {
+                loadVehicleData();
+            }
+            
+            analyzeBtn.style.display = 'inline-block';
+            resultsSection.classList.remove('show');
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        async function analyzeFile() {
+            if (!selectedFile) return;
+
+            // Hide results, show loading
+            resultsSection.classList.remove('show');
+            loading.classList.add('show');
+            analyzeBtn.disabled = true;
+
+            const formData = new FormData();
+            formData.append('file', selectedFile);
+            
+            // Add vehicle information if provided
+            const make = document.getElementById('vehicleMake').value.trim();
+            const year = document.getElementById('vehicleYear').value.trim();
+            const variant = document.getElementById('vehicleVariant').value.trim();
+            
+            console.log('DEBUG: Vehicle info being sent:', { make, year, variant });
+            
+            if (make) formData.append('make', make);
+            if (year) formData.append('year', year);
+            if (variant) formData.append('variant', variant);
+
+            try {
+                const response = await fetch('/api/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+                console.log('DEBUG: Response from backend:', data);
+
+                if (data.error) {
+                    showError(data.error);
+                } else {
+                    displayResults(data);
+                }
+            } catch (error) {
+                showError('An error occurred while analyzing the file: ' + error.message);
+            } finally {
+                loading.classList.remove('show');
+                analyzeBtn.disabled = false;
+            }
+        }
+
+        function displayResults(data) {
+            let html = '';
+
+            // Debug: Log received data
+            console.log('DEBUG: Received data from backend:', data);
+            console.log('DEBUG: Parsed damages:', data.parsed?.damages);
+
+            // Parse and display damage information
+            const parsed = data.parsed || {};
+
+            // Show annotated image FIRST and prominently when damage is found
+            if (data.annotated_url) {
+                html += '<div style="margin-top: 20px; text-align: center; background: #f8f9ff; padding: 30px; border-radius: 15px; margin-bottom: 30px;">';
+                html += '<h2 style="margin-bottom: 20px; color: #667eea; font-size: 1.8em;">📍 Damage Detection Visualization</h2>';
+                html += '<p style="color: #666; margin-bottom: 20px; font-size: 1.1em;">Rectangular boxes highlight detected damage areas</p>';
+                html += `<img src="${data.annotated_url}" alt="Annotated image with damage boxes" class="preview-image" style="border: 3px solid #667eea; box-shadow: 0 8px 25px rgba(102, 126, 234, 0.3);">`;
+                html += '<div style="margin-top: 15px; padding: 15px; background: white; border-radius: 10px; display: inline-block;">';
+                html += '<div style="display: flex; gap: 20px; justify-content: center; flex-wrap: wrap;">';
+                html += '<div style="display: flex; align-items: center; gap: 8px;"><div style="width: 20px; height: 20px; background: #dc3545; border: 2px solid #dc3545;"></div><span style="color: #333;">Severe</span></div>';
+                html += '<div style="display: flex; align-items: center; gap: 8px;"><div style="width: 20px; height: 20px; background: #fd7e14; border: 2px solid #fd7e14;"></div><span style="color: #333;">Moderate</span></div>';
+                html += '<div style="display: flex; align-items: center; gap: 8px;"><div style="width: 20px; height: 20px; background: #ffc107; border: 2px solid #ffc107;"></div><span style="color: #333;">Minor</span></div>';
+                html += '</div>';
+                html += '</div>';
+                html += '<div style="margin-top: 10px;">';
+                // Use the ORIGINAL (unannotated) image for manual correction when available
+                const editorImageUrl = data.preview_url || data.annotated_url;
+                html += `<button type="button" onclick="openAnnotationEditor('${editorImageUrl}')" style="padding: 8px 20px; border-radius: 20px; border: none; background: #ffffff; color: #667eea; font-weight: 600; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.15);">🖊 Adjust Annotation (Beta)</button>`;
+                html += '</div>';
+                html += '</div>';
+            } else if (data.preview_url) {
+                // Show original preview if no annotated image available
+                html += '<div style="margin-top: 20px; text-align: center;">';
+                html += '<h3 style="margin-bottom: 15px; color: #333;">Original Image</h3>';
+                html += `<img src="${data.preview_url}" alt="Uploaded file" class="preview-image">`;
+                html += '<div style="margin-top: 10px;">';
+                html += `<button type="button" onclick="openAnnotationEditor('${data.preview_url}')" style="padding: 8px 20px; border-radius: 20px; border: none; background: #ffffff; color: #667eea; font-weight: 600; cursor: pointer; box-shadow: 0 2px 6px rgba(0,0,0,0.15);">🖊 Adjust Annotation (Beta)</button>`;
+                html += '</div>';
+                html += '</div>';
+            }
+
+            // Display damage information
+            if (!parsed.damage_found || parsed.damages.length === 0) {
+                html += '<div class="no-damage">✅ No damage detected - Vehicle appears to be in good condition!</div>';
+            } else {
+                html += '<div class="damage-summary">';
+                html += `<h3 style="margin-bottom: 15px; color: #333;">📋 Damage Details (${parsed.damages.length} area(s) detected)</h3>`;
+                html += '</div>';
+
+                html += '<div class="damages-list">';
+                parsed.damages.forEach((damage, index) => {
+                    const severity = (damage.severity || damage.extent || 'Unknown').toLowerCase();
+                    const severityClass = severity.includes('severe') ? 'severe' : 
+                                        severity.includes('moderate') ? 'moderate' : 'minor';
+                    
+                    // Debug: Log each damage object
+                    console.log(`DEBUG: Damage ${index + 1}:`, damage);
+                    console.log(`DEBUG: Estimated cost for damage ${index + 1}:`, damage.estimated_cost_inr, 'Type:', typeof damage.estimated_cost_inr);
+                    
+                    html += `<div class="damage-card ${severityClass}">`;
+                    html += '<div class="damage-header">';
+                    html += `<div class="damage-number">${damage.id || index + 1}</div>`;
+                    html += `<span class="severity-badge ${severityClass}">${damage.severity || damage.extent || 'Unknown'}</span>`;
+                    html += '</div>';
+                    html += '<div class="damage-info">';
+                    html += '<div class="info-item">';
+                    html += '<div class="info-label" style="color: #333;">Location</div>';
+                    html += `<div class="info-value" style="color: #333;">${damage.location || 'Not specified'}</div>`;
+                    html += '</div>';
+                    html += '<div class="info-item">';
+                    html += '<div class="info-label" style="color: #333;">Type</div>';
+                    html += `<div class="info-value" style="color: #333;">${damage.type || 'Unknown'}</div>`;
+                    html += '</div>';
+                    html += '<div class="info-item">';
+                    html += '<div class="info-label" style="color: #333;">Severity</div>';
+                    html += `<div class="info-value" style="color: #333;">${damage.severity || damage.extent || 'Unknown'}</div>`;
+                    html += '</div>';
+                    // Display estimated cost if available (check for null, undefined, and ensure it's a valid number)
+                    const cost = damage.estimated_cost_inr;
+                    console.log(`DEBUG: Cost check for damage ${index + 1}:`, {
+                        cost: cost,
+                        isNull: cost === null,
+                        isUndefined: cost === undefined,
+                        isEmpty: cost === '',
+                        isNaN: isNaN(Number(cost)),
+                        numberValue: Number(cost),
+                        willDisplay: cost !== null && cost !== undefined && cost !== '' && !isNaN(Number(cost)) && Number(cost) > 0
+                    });
+                    if (cost !== null && cost !== undefined && cost !== '' && !isNaN(Number(cost)) && Number(cost) > 0) {
+                        html += '<div class="info-item" style="background: #e8f5e9; border-left: 3px solid #4caf50;">';
+                        html += '<div class="info-label" style="color: #333;">Estimated Cost</div>';
+                        html += `<div class="info-value" style="color: #2e7d32; font-size: 1.2em; font-weight: bold;">₹${Number(cost).toLocaleString('en-IN')}</div>`;
+                        html += '</div>';
+                    } else {
+                        console.log(`DEBUG: Cost NOT displayed for damage ${index + 1} - cost value:`, cost);
+                    }
+                    html += '</div>';
+                    html += '</div>';
+                });
+                html += '</div>';
+            }
+
+            // Feedback section for human validation
+            html += '<div style="margin-top: 30px; padding: 20px; background: #f8f9ff; border-radius: 10px;">';
+            html += '<h3 style="margin-bottom: 15px; color: #333;">✅ Help us improve accuracy</h3>';
+            html += '<p style="color: #666; margin-bottom: 15px; font-size: 0.95em;">Please confirm if the detection is correct. If the location is incorrect, you can suggest the correct location. This feedback will be used later to improve the model.</p>';
+            html += '<div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 10px;">';
+            html += '<label style="display: flex; align-items: center; gap: 8px; color: #333; font-size: 0.95em;">';
+            html += '<input type="checkbox" id="feedbackDamageCorrect" style="transform: scale(1.1);"> Damage type & severity are correct';
+            html += '</label>';
+            html += '<label style="display: flex; align-items: center; gap: 8px; color: #333; font-size: 0.95em;">';
+            html += '<input type="checkbox" id="feedbackLocationCorrect" style="transform: scale(1.1);"> Damage location text is correct';
+            html += '</label>';
+            html += '<label style="display: flex; align-items: center; gap: 8px; color: #333; font-size: 0.95em;">';
+            html += '<input type="checkbox" id="feedbackAnnotationCorrect" style="transform: scale(1.1);"> Highlighted box correctly covers the damaged area';
+            html += '</label>';
+            html += '</div>';
+            html += '<div style="margin-top: 10px;">';
+            html += '<label for="feedbackLocationCorrection" style="display: block; margin-bottom: 5px; color: #666; font-size: 0.9em;">If location is not correct, please describe the correct location:</label>';
+            html += '<textarea id="feedbackLocationCorrection" rows="3" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #ddd; font-size: 0.95em;" placeholder="e.g., Front left bumper instead of front right bumper"></textarea>';
+            html += '</div>';
+            html += '<button type="button" onclick="submitFeedback()" style="margin-top: 15px; padding: 10px 24px; border-radius: 20px; border: none; font-weight: 600; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; cursor: pointer;">';
+            html += 'Submit Feedback';
+            html += '</button>';
+            html += '<div id="feedbackStatus" style="margin-top: 10px; font-size: 0.9em; color: #666;"></div>';
+
+            // Raw report (collapsible)
+            if (data.raw_report) {
+                html += '<div class="raw-report">';
+                html += '<div class="raw-report-header" onclick="toggleRawReport()">📄 View Full Report (Click to expand)</div>';
+                html += `<div class="raw-report-content" id="rawReportContent">${escapeHtml(data.raw_report)}</div>`;
+                html += '</div>';
+            }
+
+            resultsContent.innerHTML = html;
+            resultsSection.classList.add('show');
+        }
+
+        function toggleRawReport() {
+            const content = document.getElementById('rawReportContent');
+            if (content) {
+                content.classList.toggle('show');
+            }
+        }
+
+        async function submitFeedback() {
+            const damageCorrect = document.getElementById('feedbackDamageCorrect');
+            const locationCorrect = document.getElementById('feedbackLocationCorrect');
+            const annotationCorrect = document.getElementById('feedbackAnnotationCorrect');
+            const locationCorrection = document.getElementById('feedbackLocationCorrection');
+            const statusEl = document.getElementById('feedbackStatus');
+
+            if (!damageCorrect || !locationCorrect || !annotationCorrect || !locationCorrection || !statusEl) {
+                return;
+            }
+
+            // Require the user to at least answer one checkbox
+            if (!damageCorrect.checked && !locationCorrect.checked && !annotationCorrect.checked) {
+                statusEl.style.color = '#dc3545';
+                statusEl.textContent = 'Please mark at least one checkbox (damage, location, or annotation) before submitting.';
+                return;
+            }
+
+            // If location is not checked as correct, encourage correction text
+            if (!locationCorrect.checked && !locationCorrection.value.trim()) {
+                statusEl.style.color = '#dc3545';
+                statusEl.textContent = 'Location not marked as correct. Please describe the correct location.';
+                return;
+            }
+
+            const payload = {
+                damage_correct: damageCorrect.checked,
+                location_correct: locationCorrect.checked,
+                annotation_correct: annotationCorrect.checked,
+                location_correction: locationCorrection.value.trim(),
+                // Attach minimal context for later training
+                timestamp: new Date().toISOString()
+            };
+
+            try {
+                statusEl.style.color = '#666';
+                statusEl.textContent = 'Sending feedback...';
+                const response = await fetch('/api/feedback', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    statusEl.style.color = '#28a745';
+                    statusEl.textContent = 'Thank you! Your feedback has been recorded.';
+                } else {
+                    statusEl.style.color = '#dc3545';
+                    statusEl.textContent = 'Could not save feedback: ' + (data.error || 'Unknown error');
+                }
+            } catch (error) {
+                statusEl.style.color = '#dc3545';
+                statusEl.textContent = 'Error sending feedback: ' + error.message;
+            }
+        }
+
+        function showError(message) {
+            resultsContent.innerHTML = `<div class="error-message"><strong>Error:</strong> ${escapeHtml(message)}</div>`;
+            resultsSection.classList.add('show');
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // ===== Annotation Editor (manual correction) =====
+
+        function openAnnotationEditor(imageUrl) {
+            const overlay = document.getElementById('annotationEditorOverlay');
+            const canvas = document.getElementById('annotationCanvas');
+            const statusEl = document.getElementById('annotationEditorStatus');
+            if (!overlay || !canvas) return;
+
+            annotationEditorState.imageUrl = imageUrl;
+            annotationEditorState.canvas = canvas;
+            annotationEditorState.ctx = canvas.getContext('2d');
+            annotationEditorState.rect = null;
+            statusEl.textContent = '';
+
+            const img = new Image();
+            img.crossOrigin = 'anonymous';
+            img.onload = function() {
+                // Set canvas size to image size (capped for very large images)
+                const maxWidth = 900;
+                const maxHeight = 600;
+                let width = img.width;
+                let height = img.height;
+                const scale = Math.min(maxWidth / width, maxHeight / height, 1);
+                width = Math.round(width * scale);
+                height = Math.round(height * scale);
+
+                canvas.width = width;
+                canvas.height = height;
+
+                annotationEditorState.image = img;
+                annotationEditorState.imageWidth = width;
+                annotationEditorState.imageHeight = height;
+
+                annotationEditorState.ctx.clearRect(0, 0, width, height);
+                annotationEditorState.ctx.drawImage(img, 0, 0, width, height);
+            };
+            img.onerror = function() {
+                statusEl.style.color = '#dc3545';
+                statusEl.textContent = 'Could not load image for annotation editing.';
+            };
+            img.src = imageUrl;
+
+            // Set up mouse events
+            canvas.onmousedown = function(e) {
+                const rect = canvas.getBoundingClientRect();
+                annotationEditorState.isDrawing = true;
+                annotationEditorState.startX = e.clientX - rect.left;
+                annotationEditorState.startY = e.clientY - rect.top;
+                annotationEditorState.rect = null;
+            };
+
+            canvas.onmousemove = function(e) {
+                if (!annotationEditorState.isDrawing || !annotationEditorState.image) return;
+                const rect = canvas.getBoundingClientRect();
+                const currentX = e.clientX - rect.left;
+                const currentY = e.clientY - rect.top;
+                const x = Math.min(annotationEditorState.startX, currentX);
+                const y = Math.min(annotationEditorState.startY, currentY);
+                const w = Math.abs(currentX - annotationEditorState.startX);
+                const h = Math.abs(currentY - annotationEditorState.startY);
+
+                // Redraw image and rectangle
+                annotationEditorState.ctx.clearRect(0, 0, canvas.width, canvas.height);
+                annotationEditorState.ctx.drawImage(annotationEditorState.image, 0, 0, canvas.width, canvas.height);
+                annotationEditorState.ctx.strokeStyle = '#ff5722';
+                annotationEditorState.ctx.lineWidth = 2;
+                annotationEditorState.ctx.strokeRect(x, y, w, h);
+
+                annotationEditorState.rect = { x, y, w, h };
+            };
+
+            canvas.onmouseup = function() {
+                annotationEditorState.isDrawing = false;
+            };
+
+            overlay.style.display = 'flex';
+        }
+
+        function closeAnnotationEditor() {
+            const overlay = document.getElementById('annotationEditorOverlay');
+            if (overlay) {
+                overlay.style.display = 'none';
+            }
+        }
+
+        async function saveAnnotationEdits() {
+            const statusEl = document.getElementById('annotationEditorStatus');
+            const rect = annotationEditorState.rect;
+            const canvas = annotationEditorState.canvas;
+
+            if (!rect || !canvas || !annotationEditorState.imageUrl) {
+                if (statusEl) {
+                    statusEl.style.color = '#dc3545';
+                    statusEl.textContent = 'Please draw a box on the image before saving.';
+                }
+                return;
+            }
+
+            const xPercent = (rect.x / canvas.width) * 100;
+            const yPercent = (rect.y / canvas.height) * 100;
+            const wPercent = (rect.w / canvas.width) * 100;
+            const hPercent = (rect.h / canvas.height) * 100;
+
+            const payload = {
+                image_url: annotationEditorState.imageUrl,
+                box: {
+                    x_percent: Number(xPercent.toFixed(2)),
+                    y_percent: Number(yPercent.toFixed(2)),
+                    width_percent: Number(wPercent.toFixed(2)),
+                    height_percent: Number(hPercent.toFixed(2))
+                },
+                timestamp: new Date().toISOString()
+            };
+
+            try {
+                if (statusEl) {
+                    statusEl.style.color = '#666';
+                    statusEl.textContent = 'Saving annotation...';
+                }
+                const response = await fetch('/api/save-annotation', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+                const data = await response.json();
+                if (response.ok) {
+                    if (statusEl) {
+                        statusEl.style.color = '#28a745';
+                        statusEl.textContent = 'Annotation saved as feedback. Thank you!';
+                    }
+                    // Automatically close the editor after successful save
+                    setTimeout(() => {
+                        closeAnnotationEditor();
+                    }, 800);
+                } else {
+                    if (statusEl) {
+                        statusEl.style.color = '#dc3545';
+                        statusEl.textContent = 'Could not save annotation: ' + (data.error || 'Unknown error');
+                    }
+                }
+            } catch (error) {
+                if (statusEl) {
+                    statusEl.style.color = '#dc3545';
+                    statusEl.textContent = 'Error saving annotation: ' + error.message;
+                }
+            }
+        }
+    </script>
+</body>
+</html>
+'''
+
+@app.route('/')
+def index():
+    """Serve the main HTML page."""
+    return render_template_string(HTML_TEMPLATE)
+
+@app.route('/api/analyze', methods=['POST'])
+def analyze():
+    """API endpoint to analyze uploaded file."""
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        if not allowed_file(file.filename):
+            return jsonify({'error': 'File type not allowed'}), 400
+        
+        # Save uploaded file
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{timestamp}_{file.filename}"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(filepath)
+        
+        # Check if it's a video
+        is_video = is_video_file(filepath)
+        
+        # Get vehicle information from request (optional, WITHOUT defaults)
+        # If user does not select make/year/model, we should NOT estimate cost.
+        vehicle_make = request.form.get('make', '').strip()
+        vehicle_year_raw = request.form.get('year', '').strip()
+        vehicle_variant = request.form.get('variant', '').strip()
+        
+        # Convert year to int if provided
+        vehicle_year = None
+        try:
+            vehicle_year = int(vehicle_year_raw) if vehicle_year_raw else None
+        except (ValueError, TypeError):
+            vehicle_year = None
+        
+        # Only enable cost estimation when all three fields are provided
+        has_vehicle_info = bool(vehicle_make and vehicle_year is not None and vehicle_variant)
+        
+        # Analyze the file - get report, annotated path, and structured damages list
+        report, annotated_path, damages_list = analyze_vehicle_damage(filepath, is_video=is_video, multi_frame=False)
+        
+        # Use damages_list from bounding boxes as source of truth (ensures annotations match results)
+        if damages_list and len(damages_list) > 0:
+            # Convert bounding box damages to the format expected by frontend
+            structured_damages = []
+            for i, damage in enumerate(damages_list):
+                damage_type = damage.get('label', 'Unknown')
+                severity = damage.get('extent', 'Unknown')
+                
+                # Get cost estimate for this damage (only if full vehicle info provided)
+                estimated_cost = None
+                if has_vehicle_info and damage_type != 'Unknown' and severity != 'Unknown':
+                    print(f"DEBUG: Attempting to get cost for: {vehicle_make} {vehicle_variant} {vehicle_year} - {damage_type} ({severity})")
+                    try:
+                        estimated_cost = get_estimate(
+                            make=vehicle_make,
+                            year=vehicle_year,
+                            variant=vehicle_variant,
+                            defect_type=damage_type,
+                            severity=severity
+                        )
+                        print(f"DEBUG: get_estimate returned: {estimated_cost}")
+                        # Debug logging (can be removed in production)
+                        if estimated_cost is None:
+                            print(f"DEBUG: No cost found for {vehicle_make} {vehicle_variant} {vehicle_year} - {damage_type} ({severity})")
+                            print(f"DEBUG: Make='{vehicle_make}', Variant='{vehicle_variant}', Year={vehicle_year}")
+                        else:
+                            print(f"DEBUG: Cost found: ₹{estimated_cost} for {damage_type} ({severity})")
+                    except Exception as e:
+                        print(f"DEBUG: Error getting estimate: {e}")
+                        import traceback
+                        traceback.print_exc()
+                        estimated_cost = None
+                
+                structured_damages.append({
+                    'id': i + 1,
+                    'location': damage.get('location', 'Not specified'),
+                    'type': damage_type,
+                    'severity': severity,
+                    'extent': severity,
+                    'estimated_cost_inr': estimated_cost
+                })
+            
+            parsed = {
+                'damage_found': True,
+                'damages': structured_damages
+            }
+        else:
+            # No damages found - check text report as fallback
+            parsed = parse_damage_report(report)
+            if parsed.get('damage_found') and parsed.get('damages'):
+                # Add cost estimates to parsed damages from text report
+                for damage in parsed['damages']:
+                    damage_type = damage.get('type', 'Unknown')
+                    severity = damage.get('severity', damage.get('extent', 'Unknown'))
+                    
+                    if has_vehicle_info and damage_type != 'Unknown' and severity != 'Unknown':
+                        print(f"DEBUG: Attempting to get cost for: {vehicle_make} {vehicle_variant} {vehicle_year} - {damage_type} ({severity})")
+                        try:
+                            estimated_cost = get_estimate(
+                                make=vehicle_make,
+                                year=vehicle_year,
+                                variant=vehicle_variant,
+                                defect_type=damage_type,
+                                severity=severity
+                            )
+                            print(f"DEBUG: get_estimate returned: {estimated_cost}")
+                            damage['estimated_cost_inr'] = estimated_cost
+                        except Exception as e:
+                            print(f"DEBUG: Error getting estimate: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            damage['estimated_cost_inr'] = None
+                    else:
+                        # Missing full vehicle info or invalid damage type/severity -> no cost
+                        damage['estimated_cost_inr'] = None
+            elif not parsed.get('damage_found'):
+                parsed = {
+                    'damage_found': False,
+                    'damages': []
+                }
+        
+        # Prepare response
+        response_data = {
+            'parsed': parsed,
+            'raw_report': report
+        }
+        
+        # Add preview URL
+        if not is_video:
+            # For images, create a preview URL
+            preview_filename = f"preview_{filename}"
+            preview_path = os.path.join(UPLOAD_FOLDER, preview_filename)
+            # Copy file for preview
+            import shutil
+            shutil.copy2(filepath, preview_path)
+            response_data['preview_url'] = f'/api/preview/{preview_filename}'
+        else:
+            # For videos, we could extract a frame for preview
+            response_data['preview_url'] = None
+        
+        # Add annotated image URL if available
+        if annotated_path:
+            annotated_filename = os.path.basename(annotated_path)
+            # Move annotated image to uploads folder for serving
+            if os.path.dirname(annotated_path) != UPLOAD_FOLDER:
+                new_annotated_path = os.path.join(UPLOAD_FOLDER, annotated_filename)
+                import shutil
+                shutil.move(annotated_path, new_annotated_path)
+                response_data['annotated_url'] = f'/api/preview/{annotated_filename}'
+            else:
+                response_data['annotated_url'] = f'/api/preview/{annotated_filename}'
+        
+        return jsonify(response_data)
+        
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/preview/<filename>')
+def preview(filename):
+    """Serve preview images."""
+    filepath = os.path.join(UPLOAD_FOLDER, filename)
+    if os.path.exists(filepath):
+        return send_file(filepath)
+    return jsonify({'error': 'File not found'}), 404
+
+@app.route('/api/logo')
+def logo():
+    """Serve the logo image."""
+    logo_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'logo-algotropic.jpg')
+    if os.path.exists(logo_path):
+        return send_file(logo_path)
+    return jsonify({'error': 'Logo not found'}), 404
+
+
+@app.route('/api/feedback', methods=['POST'])
+def feedback():
+    """Collect simple user feedback about detection accuracy for offline model improvement."""
+    try:
+        data = request.get_json(force=True, silent=True) or {}
+
+        # Basic validation
+        damage_correct = bool(data.get('damage_correct', False))
+        location_correct = bool(data.get('location_correct', False))
+        location_correction = (data.get('location_correction') or '').strip()
+        timestamp = data.get('timestamp')
+
+        # Annotation correctness (optional)
+        annotation_correct = bool(data.get('annotation_correct', False))
+
+        # Build feedback record
+        record = {
+            'damage_correct': damage_correct,
+            'location_correct': location_correct,
+            'annotation_correct': annotation_correct,
+            'location_correction': location_correction,
+            'timestamp': timestamp,
+        }
+
+        # Append to a JSON Lines file for later training/analysis
+        feedback_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'feedback_log.jsonl')
+        with open(feedback_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+        return jsonify({'status': 'ok'})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/save-annotation', methods=['POST'])
+def save_annotation():
+    """Save manually corrected annotation boxes for offline analysis/training."""
+    try:
+        payload = request.get_json(force=True, silent=True) or {}
+        image_url = payload.get('image_url', '')
+        box = payload.get('box') or {}
+        timestamp = payload.get('timestamp') or datetime.utcnow().isoformat()
+
+        record = {
+            'image_url': image_url,
+            'box': box,
+            'timestamp': timestamp,
+        }
+
+        # Try to also generate a human-annotated image for easy visual comparison
+        human_image_path = None
+        try:
+            if CV2_AVAILABLE and image_url and box:
+                # image_url is like /api/preview/<filename>
+                filename = image_url.split('/')[-1]
+                src_path = os.path.join(UPLOAD_FOLDER, filename)
+                if os.path.exists(src_path):
+                    img = cv2.imread(src_path)
+                    if img is not None:
+                        h, w = img.shape[:2]
+                        x = int(float(box.get('x_percent', 0)) * w / 100.0)
+                        y = int(float(box.get('y_percent', 0)) * h / 100.0)
+                        bw = int(float(box.get('width_percent', 0)) * w / 100.0)
+                        bh = int(float(box.get('height_percent', 0)) * h / 100.0)
+
+                        # Clamp to image bounds
+                        x = max(0, min(x, w - 1))
+                        y = max(0, min(y, h - 1))
+                        bw = max(1, min(bw, w - x))
+                        bh = max(1, min(bh, h - y))
+
+                        # Draw a visible rectangle
+                        color = (0, 165, 255)  # Orange
+                        thickness = max(2, int(min(w, h) / 200))
+                        cv2.rectangle(img, (x, y), (x + bw, y + bh), color, thickness)
+
+                        # Save to human annotations folder
+                        base, ext = os.path.splitext(filename)
+                        out_name = f"{base}_human_annotated{ext or '.jpg'}"
+                        human_image_path = os.path.join(HUMAN_ANNOTATIONS_FOLDER, out_name)
+                        cv2.imwrite(human_image_path, img)
+        except Exception as inner_e:
+            # Do not fail the API just because image writing failed
+            print(f"Warning: could not create human annotated image: {inner_e}")
+            human_image_path = None
+
+        if human_image_path:
+            record['human_annotated_path'] = human_image_path
+
+        corrections_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'annotation_corrections.jsonl')
+        with open(corrections_path, 'a', encoding='utf-8') as f:
+            f.write(json.dumps(record, ensure_ascii=False) + '\n')
+
+        return jsonify({'status': 'ok', 'human_annotated_path': human_image_path})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vehicle-data')
+def vehicle_data():
+    """Get unique vehicle makes, years, and models from the database."""
+    try:
+        from dummy_database import data
+        
+        if not data or not isinstance(data, list):
+            return jsonify({'error': 'Database not loaded'}), 500
+        
+        # Extract unique values
+        makes = sorted(set(entry.get("Brand", "") for entry in data if entry.get("Brand")))
+        years = sorted(set(entry.get("Year") for entry in data if entry.get("Year") is not None), reverse=True)
+        
+        return jsonify({
+            'makes': makes,
+            'years': years
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vehicle-years')
+def vehicle_years():
+    """Get years for a specific make."""
+    try:
+        from dummy_database import data
+        
+        make = request.args.get('make', '').strip()
+        
+        if not make:
+            return jsonify({'error': 'Make parameter required'}), 400
+        
+        if not data or not isinstance(data, list):
+            return jsonify({'error': 'Database not loaded'}), 500
+        
+        # Filter by make and extract unique years
+        years = sorted(set(entry.get("Year") for entry in data 
+                          if entry.get("Brand", "").lower() == make.lower() 
+                          and entry.get("Year") is not None), reverse=True)
+        
+        return jsonify({
+            'years': years
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+@app.route('/api/vehicle-models')
+def vehicle_models():
+    """Get models for a specific make and optionally year."""
+    try:
+        from dummy_database import data
+        
+        make = request.args.get('make', '').strip()
+        year = request.args.get('year', '').strip()
+        
+        if not make:
+            return jsonify({'error': 'Make parameter required'}), 400
+        
+        if not data or not isinstance(data, list):
+            return jsonify({'error': 'Database not loaded'}), 500
+        
+        # Filter by make
+        filtered = [entry for entry in data if entry.get("Brand", "").lower() == make.lower()]
+        
+        # Filter by year if provided
+        if year:
+            try:
+                year_int = int(year)
+                filtered = [entry for entry in filtered if entry.get("Year") == year_int]
+            except ValueError:
+                pass
+        
+        # Extract unique models
+        models = sorted(set(entry.get("Model", "") for entry in filtered if entry.get("Model")))
+        
+        return jsonify({
+            'models': models
+        })
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+if __name__ == '__main__':
+    import socket
+    import urllib.request
+    
+    # Get local IP address
+    def get_local_ip():
+        try:
+            # Connect to a remote address to determine local IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except Exception:
+            return "localhost"
+    
+    # Get public IP address
+    def get_public_ip():
+        try:
+            response = urllib.request.urlopen('https://api.ipify.org', timeout=3)
+            return response.read().decode('utf-8')
+        except Exception:
+            return None
+    
+    local_ip = get_local_ip()
+    public_ip = get_public_ip()
+    
+    print("=" * 70)
+    print("Vehicle Damage Detection Web Application")
+    print("=" * 70)
+    print("\nStarting server...")
+    print(f"\n📍 Access from this device:")
+    print(f"   http://localhost:5000")
+    print(f"   http://127.0.0.1:5000")
+    print(f"\n🌐 Access from other devices on the same network:")
+    print(f"   http://{local_ip}:5000")
+    
+    if public_ip:
+        print(f"\n🌍 Public IP (requires port forwarding):")
+        print(f"   http://{public_ip}:5000")
+        print(f"   ⚠️  You need to configure port forwarding on your router")
+        print(f"   ⚠️  External port 5000 → {local_ip}:5000")
+    
+    print(f"\n💡 For easy external access, use ngrok:")
+    print(f"   1. Install ngrok from https://ngrok.com")
+    print(f"   2. Run: ngrok http 5000")
+    print(f"   3. Use the provided HTTPS URL")
+    
+    print(f"\n⚠️  SECURITY WARNING:")
+    print(f"   - Server is in DEBUG mode (not secure for production)")
+    print(f"   - No authentication enabled")
+    print(f"   - Only expose to internet if you understand the risks")
+    print(f"   - For production, disable debug mode and add authentication")
+    
+    print(f"\n⚠️  Make sure both devices are on the same Wi-Fi/network for local access")
+    print(f"⚠️  Windows Firewall may prompt for permission - allow it")
+    print(f"\nPress Ctrl+C to stop the server")
+    print("=" * 70)
+    
+    # Get port from environment variable (for cloud platforms) or default to 5000
+    port = int(os.environ.get('PORT', 5000))
+    
+    # Determine if we're in production (debug mode should be False in production)
+    # Set DEBUG_MODE environment variable to 'true' to enable debug mode
+    debug_mode = os.environ.get('DEBUG_MODE', 'false').lower() == 'true'
+    
+    # For production, set debug=False
+    # For development/testing, set DEBUG_MODE=true environment variable
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)
+

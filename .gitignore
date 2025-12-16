@@ -1,0 +1,59 @@
+# Environment variables and API keys
+.env
+.env.local
+.env.*.local
+*.key
+*_key.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Application data (don't commit user uploads or feedback)
+uploads/*
+!uploads/.gitkeep
+feedback_log.jsonl
+annotation_corrections.jsonl
+
+# Deployment files (optional - you may want to keep these)
+# .env
+# .env.production
+

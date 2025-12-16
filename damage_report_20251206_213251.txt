@@ -1,0 +1,24 @@
+
+============================================================
+  VEHICLE DAMAGE DETECTION
+============================================================
+  Time: 2025-12-06 21:32:51
+============================================================
+
+File: C:/Car Damage Detection Project/toyota_damage/WhatsApp Image 2025-12-06 at 11.21.39.jpeg
+
+DAMAGE FOUND: Yes
+
+---
+DAMAGE 1:
+- Location: Rear bumper
+- Type: Scratch
+- Extent: Minor
+---
+DAMAGE 2:
+- Location: Rear bumper
+- Type: Scuff
+- Extent: Minor
+---
+
+Annotated image: WhatsApp Image 2025-12-06 at 11.21.39_annotated_20251206_213158.jpg
