@@ -4,6 +4,9 @@
 .env.*.local
 *.key
 *_key.txt
+google-vision-key.json
+*vision-key.json
+*-vision-*.json
 
 # Python
 __pycache__/

@@ -74,10 +74,10 @@ except Exception as e:
     sys.exit(1)
 
 # Model Configuration
-# GPT-4o (Omni) is the latest and most capable vision model from OpenAI
+# GPT-4o-2024-11-20 is the latest GPT-4 Omni snapshot with improved accuracy
 # It provides superior accuracy for damage detection and can handle multiple damages effectively
-# Alternative models (if available): "gpt-4o-2024-08-06", "gpt-4-turbo", "gpt-4-vision-preview"
-GPT_MODEL = "gpt-4o"  # Using GPT-4 Omni for best accuracy
+# Alternative models: "gpt-4o", "gpt-4o-mini" (faster/cheaper), "o1-preview" (advanced reasoning)
+GPT_MODEL = "gpt-4o-2024-11-20"  # Latest GPT-4 Omni snapshot for best accuracy
 IMAGE_DETAIL = "high"  # Use high detail for better damage detection accuracy
 MAX_TOKENS_BOXES = 4000  # Increased for multiple damage descriptions
 MAX_TOKENS_REPORT = 2000  # Increased to handle multiple damages

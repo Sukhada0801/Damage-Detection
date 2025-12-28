@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from datetime import datetime
 import base64
+import requests
 try:
     import cv2
     CV2_AVAILABLE = True
@@ -29,6 +30,13 @@ from openai_gpt_vision import (
     get_mime_type
 )
 from dummy_database import dummy_db, get_estimate
+
+# Import Google Vision OCR helper
+try:
+    from google_ocr_helper import process_with_google_vision as google_vision_process
+    GOOGLE_VISION_HELPER_AVAILABLE = True
+except ImportError:
+    GOOGLE_VISION_HELPER_AVAILABLE = False
 
 app = Flask(__name__)
 CORS(app)
@@ -253,6 +261,13 @@ HTML_TEMPLATE = '''
         .analyze-btn:disabled {
             opacity: 0.6;
             cursor: not-allowed;
+        }
+
+        #clearAllBtn:hover {
+            background: #ef4444 !important;
+            color: white !important;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 15px rgba(239, 68, 68, 0.4);
         }
 
         .loading {
@@ -489,19 +504,521 @@ HTML_TEMPLATE = '''
                 grid-template-columns: 1fr;
             }
         }
+
+        /* Document Translation Section Styles */
+        .document-section {
+            border: 3px dashed #10b981;
+            border-radius: 15px;
+            padding: 35px;
+            text-align: center;
+            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+            transition: all 0.3s ease;
+            margin-top: 40px;
+            position: relative;
+            overflow: hidden;
+        }
+
+        .document-section::before {
+            content: '';
+            position: absolute;
+            top: -50%;
+            left: -50%;
+            width: 200%;
+            height: 200%;
+            background: radial-gradient(circle, rgba(16, 185, 129, 0.05) 0%, transparent 70%);
+            animation: pulse-bg 4s ease-in-out infinite;
+            pointer-events: none;
+        }
+
+        @keyframes pulse-bg {
+            0%, 100% { transform: scale(1); opacity: 0.5; }
+            50% { transform: scale(1.1); opacity: 0.8; }
+        }
+
+        .document-section:hover {
+            border-color: #059669;
+            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+            transform: translateY(-2px);
+            box-shadow: 0 8px 25px rgba(16, 185, 129, 0.2);
+        }
+
+        .document-section.dragover {
+            border-color: #059669;
+            background: linear-gradient(135deg, #a7f3d0 0%, #6ee7b7 100%);
+            transform: scale(1.02);
+        }
+
+        .document-section h2 {
+            color: #065f46;
+            margin-bottom: 15px;
+            position: relative;
+            z-index: 1;
+        }
+
+        .document-section p {
+            color: #047857;
+            position: relative;
+            z-index: 1;
+        }
+
+        .doc-input-label {
+            display: inline-block;
+            padding: 15px 40px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border-radius: 50px;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 600;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
+            position: relative;
+            z-index: 1;
+        }
+
+        .doc-input-label:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.6);
+        }
+
+        .translate-btn {
+            padding: 15px 50px;
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            border: none;
+            border-radius: 50px;
+            font-size: 1.2em;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.4);
+            margin-top: 20px;
+        }
+
+        .translate-btn:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.6);
+        }
+
+        .translate-btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .doc-file-info {
+            margin-top: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 10px;
+            display: none;
+            border: 2px solid #10b981;
+        }
+
+        .doc-file-info.show {
+            display: block;
+        }
+
+        .doc-loading {
+            display: none;
+            text-align: center;
+            padding: 40px;
+            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+            border-radius: 15px;
+            margin-top: 20px;
+        }
+
+        .doc-loading.show {
+            display: block;
+        }
+
+        .doc-spinner {
+            border: 4px solid #d1fae5;
+            border-top: 4px solid #10b981;
+            border-radius: 50%;
+            width: 50px;
+            height: 50px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 20px;
+        }
+
+        .translation-results {
+            display: none;
+            margin-top: 30px;
+            background: white;
+            border-radius: 15px;
+            overflow: hidden;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
+        }
+
+        .translation-results.show {
+            display: block;
+        }
+
+        .translation-header {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            color: white;
+            padding: 20px;
+        }
+
+        .translation-header h2 {
+            color: white;
+            margin-bottom: 5px;
+        }
+
+        .translation-content {
+            padding: 25px;
+        }
+
+        .estimation-card {
+            background: #f8fdfb;
+            border-radius: 12px;
+            padding: 20px;
+            margin-bottom: 15px;
+            border-left: 4px solid #10b981;
+            transition: all 0.3s ease;
+        }
+
+        .estimation-card:hover {
+            transform: translateX(5px);
+            box-shadow: 0 4px 15px rgba(16, 185, 129, 0.15);
+        }
+
+        .estimation-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 12px 0;
+            border-bottom: 1px solid #e5e7eb;
+        }
+
+        .estimation-item:last-child {
+            border-bottom: none;
+        }
+
+        .estimation-label {
+            font-weight: 600;
+            color: #065f46;
+            font-size: 0.95em;
+        }
+
+        .estimation-value {
+            color: #333;
+            font-size: 1.05em;
+            text-align: right;
+            max-width: 60%;
+        }
+
+        .estimation-value.highlight {
+            color: #059669;
+            font-weight: 700;
+            font-size: 1.15em;
+        }
+
+        .raw-translation {
+            background: #f0fdf4;
+            padding: 20px;
+            border-radius: 10px;
+            margin-top: 20px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.9em;
+            white-space: pre-wrap;
+            max-height: 300px;
+            overflow-y: auto;
+            border: 1px solid #a7f3d0;
+        }
+
+        .section-header {
+            margin-top: 50px;
+            margin-bottom: 20px;
+            padding-bottom: 15px;
+            border-bottom: 2px solid #e5e7eb;
+        }
+
+        .section-header h2 {
+            color: #065f46;
+            font-size: 1.4em;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-header p {
+            color: #6b7280;
+            font-size: 0.95em;
+            margin-top: 8px;
+        }
+
+        /* Tab Navigation Styles */
+        .tab-navigation {
+            display: flex;
+            border-bottom: 3px solid #e5e7eb;
+            margin-bottom: 30px;
+            gap: 5px;
+        }
+
+        .tab-button {
+            padding: 16px 32px;
+            border: none;
+            background: transparent;
+            cursor: pointer;
+            font-size: 1.1em;
+            font-weight: 600;
+            color: #6b7280;
+            border-radius: 12px 12px 0 0;
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            position: relative;
+        }
+
+        .tab-button:hover {
+            background: #f3f4f6;
+            color: #4b5563;
+        }
+
+        .tab-button.active {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .tab-button.active.green-tab {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        .tab-button.active.orange-tab {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        }
+
+        .tab-button::after {
+            content: '';
+            position: absolute;
+            bottom: -3px;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: transparent;
+            transition: background 0.3s ease;
+        }
+
+        .tab-button.active::after {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+        }
+
+        .tab-button.active.green-tab::after {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+        }
+
+        .tab-button.active.orange-tab::after {
+            background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        }
+
+        .tab-icon {
+            font-size: 1.3em;
+        }
+
+        .tab-content {
+            display: none;
+            animation: fadeIn 0.3s ease;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        @keyframes fadeIn {
+            from {
+                opacity: 0;
+                transform: translateY(10px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+        
+        /* Image Preview Modal */
+        .image-modal {
+            display: none;
+            position: fixed;
+            z-index: 10000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.95);
+            backdrop-filter: blur(5px);
+            animation: modalFadeIn 0.3s ease;
+        }
+        
+        @keyframes modalFadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        
+        .modal-content {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+        }
+        
+        .modal-image-container {
+            position: relative;
+            max-width: 90%;
+            max-height: 80%;
+            overflow: auto;
+            cursor: grab;
+            border-radius: 10px;
+            box-shadow: 0 0 50px rgba(0, 0, 0, 0.5);
+        }
+        
+        .modal-image-container:active {
+            cursor: grabbing;
+        }
+        
+        .modal-image {
+            display: block;
+            max-width: 100%;
+            max-height: 80vh;
+            transition: transform 0.3s ease;
+            transform-origin: center center;
+        }
+        
+        .modal-image.zoomed {
+            max-width: none;
+            max-height: none;
+            cursor: zoom-out;
+        }
+        
+        .modal-close {
+            position: absolute;
+            top: 20px;
+            right: 30px;
+            color: #fff;
+            font-size: 40px;
+            font-weight: bold;
+            cursor: pointer;
+            z-index: 10001;
+            transition: all 0.2s ease;
+            text-shadow: 0 2px 10px rgba(0, 0, 0, 0.5);
+        }
+        
+        .modal-close:hover {
+            color: #ef4444;
+            transform: scale(1.2);
+        }
+        
+        .modal-controls {
+            display: flex;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .modal-btn {
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px solid rgba(255, 255, 255, 0.3);
+            color: #fff;
+            padding: 12px 25px;
+            border-radius: 25px;
+            cursor: pointer;
+            font-size: 1em;
+            transition: all 0.2s ease;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .modal-btn:hover {
+            background: rgba(255, 255, 255, 0.2);
+            border-color: rgba(255, 255, 255, 0.5);
+            transform: translateY(-2px);
+        }
+        
+        .modal-filename {
+            color: #9ca3af;
+            font-size: 0.9em;
+            margin-top: 15px;
+            text-align: center;
+        }
+        
+        .zoom-indicator {
+            position: absolute;
+            bottom: 20px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            padding: 8px 16px;
+            border-radius: 20px;
+            font-size: 0.85em;
+        }
+        
+        /* Clickable preview thumbnail */
+        .preview-thumbnail {
+            cursor: pointer;
+            transition: all 0.3s ease;
+            position: relative;
+        }
+        
+        .preview-thumbnail:hover {
+            transform: scale(1.02);
+            box-shadow: 0 8px 25px rgba(0, 0, 0, 0.3);
+        }
+        
+        .preview-thumbnail::after {
+            content: '🔍 Click to enlarge';
+            position: absolute;
+            bottom: 8px;
+            right: 8px;
+            background: rgba(0, 0, 0, 0.7);
+            color: #fff;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 0.75em;
+            opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+        
+        .preview-thumbnail:hover::after {
+            opacity: 1;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <div class="header">
+        <div class="header" id="pageHeader">
             <div class="logo-container">
                 <img src="/api/logo" alt="Algotropic Logo" class="logo">
             </div>
-            <h1>🚗 Vehicle Damage Detection</h1>
-            <p>AI-Powered Insurance Assessment System</p>
+            <h1 id="headerTitle">🚗 Vehicle Damage Detection</h1>
+            <p id="headerSubtitle">AI-Powered Insurance Assessment System</p>
         </div>
 
         <div class="content">
+            <!-- Tab Navigation -->
+            <div class="tab-navigation">
+                <button class="tab-button active" onclick="switchTab('damage')" id="tabDamage">
+                    <span class="tab-icon">🚗</span>
+                    <span>Damage Detection</span>
+                </button>
+                <button class="tab-button green-tab" onclick="switchTab('translation')" id="tabTranslation">
+                    <span class="tab-icon">📄</span>
+                    <span>Document Translation</span>
+                </button>
+                <button class="tab-button orange-tab" onclick="switchTab('combined')" id="tabCombined">
+                    <span class="tab-icon">📋</span>
+                    <span>Complete Analysis</span>
+                </button>
+            </div>
+
+            <!-- Tab 1: Damage Detection -->
+            <div class="tab-content active" id="tabContentDamage">
             <div class="upload-section" id="uploadSection">
                 <h2 style="margin-bottom: 20px; color: #333;">Upload Vehicle Image or Video</h2>
                 <p style="color: #666; margin-bottom: 30px;">
@@ -551,11 +1068,273 @@ HTML_TEMPLATE = '''
                 <p>This may take a few moments</p>
             </div>
 
-            <div class="results-section" id="resultsSection">
-                <div class="results-header">
-                    <h2>📊 Damage Analysis Results</h2>
+                <div class="results-section" id="resultsSection">
+                    <div class="results-header">
+                        <h2>📊 Damage Analysis Results</h2>
+            </div>
+                    <div id="resultsContent"></div>
                 </div>
-                <div id="resultsContent"></div>
+            </div>
+
+            <!-- Tab 2: Document Translation -->
+            <div class="tab-content" id="tabContentTranslation">
+            <div class="document-section" id="documentSection">
+                    <h2 style="font-size: 1.5em; color: #065f46; margin-bottom: 10px;">📄 Estimation Document Translation</h2>
+                    <p style="margin-bottom: 20px; font-size: 1em; color: #047857;">
+                        Upload rate documents to translate and extract estimation data
+                    </p>
+                    
+                    <!-- OCR Provider Selector -->
+                    <div style="margin-bottom: 20px; padding: 15px; background: white; border-radius: 10px; border: 2px solid #10b981;">
+                        <label style="display: block; margin-bottom: 8px; color: #065f46; font-weight: 600; font-size: 0.95em;">
+                            🔍 OCR & Translation Provider
+                        </label>
+                        <select id="ocrProvider" style="width: 100%; max-width: 300px; padding: 10px 15px; border: 2px solid #a7f3d0; border-radius: 8px; font-size: 1em; background: white; color: #065f46; cursor: pointer;">
+                            <option value="openai">OpenAI GPT-4 Vision (Recommended)</option>
+                            <option value="google">Google Cloud Vision + Translate</option>
+                        </select>
+                        <p style="margin-top: 8px; font-size: 0.8em; color: #6b7280;" id="providerNote">
+                            GPT-4 Vision provides excellent OCR with intelligent data extraction
+                        </p>
+                    </div>
+                    
+                <div class="file-input-wrapper">
+                    <input type="file" id="docFileInput" class="file-input" accept=".pdf,.doc,.docx,.txt,.png,.jpg,.jpeg,.tiff,.tif">
+                    <label for="docFileInput" class="doc-input-label">
+                        📎 Attach Document
+                    </label>
+                </div>
+                <p style="margin-top: 15px; font-size: 0.85em; color: #047857;">
+                        Supported: PDF, PNG, JPG, JPEG, TIFF files
+                </p>
+                <div class="doc-file-info" id="docFileInfo">
+                    <div class="file-name" id="docFileName" style="font-weight: 600; color: #065f46;"></div>
+                    <div class="file-size" id="docFileSize" style="color: #047857; font-size: 0.9em;"></div>
+                </div>
+                <button class="translate-btn" id="translateBtn" onclick="translateDocument()" disabled>
+                    🌐 Translate & Extract Data
+                </button>
+            </div>
+
+            <!-- Document Translation Loading -->
+            <div class="doc-loading" id="docLoading">
+                <div class="doc-spinner"></div>
+                <h3 style="color: #065f46;">Translating document...</h3>
+                <p style="color: #047857;">Converting from Singla to English and extracting information</p>
+            </div>
+
+            <!-- Translation Results Section -->
+            <div class="translation-results" id="translationResults">
+                <div class="translation-header">
+                    <h2>📋 Translated Estimation Data</h2>
+                    <p style="opacity: 0.9; font-size: 0.95em;">Extracted from your document</p>
+                </div>
+                <div class="translation-content" id="translationContent">
+                    <!-- Dynamic content will be inserted here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- Tab 3: Complete Analysis (Combined) - 3 Separate Sections -->
+            <div class="tab-content" id="tabContentCombined">
+                <h2 style="text-align: center; color: #92400e; margin-bottom: 25px; font-size: 1.6em;">📋 Complete Analysis</h2>
+                <p style="text-align: center; color: #b45309; margin-bottom: 30px;">Upload files separately for each type of analysis. Results will be displayed below.</p>
+                
+                <!-- Section 1: Damage Detection -->
+                <div class="document-section" id="combinedDamageSection" style="border-color: #8b5cf6; background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%); margin-bottom: 20px;">
+                    <h3 style="font-size: 1.3em; color: #6d28d9; margin-bottom: 10px;">🚗 Step 1: Damage Detection</h3>
+                    <p style="margin-bottom: 20px; font-size: 0.95em; color: #7c3aed;">
+                        Upload vehicle images to detect and annotate damage
+                    </p>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="combinedDamageInput" class="file-input" accept="image/*">
+                        <label for="combinedDamageInput" class="doc-input-label" style="background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);">
+                            📷 Upload Vehicle Image
+                        </label>
+                    </div>
+                    <p style="margin-top: 10px; font-size: 0.8em; color: #7c3aed;">Supported: PNG, JPG, JPEG</p>
+                    <div class="doc-file-info" id="combinedDamageFileInfo" style="border-color: #8b5cf6; background: #f5f3ff;">
+                        <div class="file-name" id="combinedDamageFileName" style="font-weight: 600; color: #6d28d9;"></div>
+                        <div class="file-size" id="combinedDamageFileSize" style="color: #7c3aed; font-size: 0.9em;"></div>
+                        <!-- Image Preview -->
+                        <div id="combinedDamagePreview" style="margin-top: 15px; display: none;">
+                            <p style="color: #6d28d9; font-size: 0.85em; margin-bottom: 8px;">📷 Preview (click to enlarge):</p>
+                            <div style="position: relative; display: inline-block;">
+                                <img id="combinedDamagePreviewImg" src="" alt="Preview" class="preview-thumbnail" onclick="openImageModal(this.src, combinedDamageFileName.textContent)" style="max-width: 100%; max-height: 200px; border-radius: 8px; border: 2px solid #8b5cf6; box-shadow: 0 4px 12px rgba(139, 92, 246, 0.2);">
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Damage Detection Loading & Results -->
+                <div class="loading" id="combinedDamageLoading" style="background: linear-gradient(135deg, #f5f3ff 0%, #ede9fe 100%); border: 2px solid #8b5cf6;">
+                    <div class="spinner" style="border-top-color: #8b5cf6;"></div>
+                    <h3 style="color: #6d28d9;">Detecting damage...</h3>
+                    <p style="color: #7c3aed;">Analyzing vehicle image for damage</p>
+                </div>
+                <div class="translation-results" id="combinedDamageResults" style="border-color: #8b5cf6; margin-bottom: 25px; background: #111827;">
+                    <div class="translation-results-header" style="background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);">
+                        <h3>🚗 Damage Detection Results</h3>
+                    </div>
+                    <div class="translation-content" id="combinedDamageContent" style="background: #111827; padding: 20px;"></div>
+                </div>
+                
+                <!-- Section 2: Vehicle Details Extraction -->
+                <div class="document-section" id="combinedVehicleSection" style="border-color: #f59e0b; background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%); margin-bottom: 20px;">
+                    <h3 style="font-size: 1.3em; color: #92400e; margin-bottom: 10px;">🔍 Step 2: Vehicle Details Extraction</h3>
+                    <p style="margin-bottom: 20px; font-size: 0.95em; color: #b45309;">
+                        Upload a document to extract vehicle information (make, model, registration, etc.)
+                    </p>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="combinedVehicleInput" class="file-input" accept=".pdf,.png,.jpg,.jpeg">
+                        <label for="combinedVehicleInput" class="doc-input-label" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
+                            📄 Upload Document
+                        </label>
+                    </div>
+                    <p style="margin-top: 10px; font-size: 0.8em; color: #b45309;">Supported: PDF, PNG, JPG, JPEG</p>
+                    <div class="doc-file-info" id="combinedVehicleFileInfo" style="border-color: #fbbf24; background: #fffbeb;">
+                        <div class="file-name" id="combinedVehicleFileName" style="font-weight: 600; color: #92400e;"></div>
+                        <div class="file-size" id="combinedVehicleFileSize" style="color: #b45309; font-size: 0.9em;"></div>
+                        <!-- Image/PDF Preview -->
+                        <div id="combinedVehiclePreview" style="margin-top: 15px; display: none;">
+                            <p style="color: #92400e; font-size: 0.85em; margin-bottom: 8px;">📄 Preview (click to enlarge):</p>
+                            <div style="position: relative; display: inline-block;">
+                                <img id="combinedVehiclePreviewImg" src="" alt="Preview" class="preview-thumbnail" onclick="openImageModal(this.src, combinedVehicleFileName.textContent)" style="max-width: 100%; max-height: 200px; border-radius: 8px; border: 2px solid #f59e0b; box-shadow: 0 4px 12px rgba(245, 158, 11, 0.2);">
+                            </div>
+                            <p id="combinedVehiclePdfNote" style="display: none; color: #b45309; font-size: 0.8em; margin-top: 5px;">📋 PDF file selected - preview not available</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Vehicle Details Loading & Results -->
+                <div class="loading" id="combinedVehicleLoading" style="background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%); border: 2px solid #f59e0b;">
+                    <div class="spinner" style="border-top-color: #f59e0b;"></div>
+                    <h3 style="color: #92400e;">Extracting vehicle details...</h3>
+                    <p style="color: #b45309;">Reading document for vehicle information</p>
+                </div>
+                <div class="translation-results" id="combinedVehicleResults" style="border-color: #f59e0b; margin-bottom: 25px; background: #111827;">
+                    <div class="translation-results-header" style="background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);">
+                        <h3>🔍 Vehicle Details</h3>
+                    </div>
+                    <div class="translation-content" id="combinedVehicleContent" style="background: #111827; padding: 20px;"></div>
+                </div>
+                
+                <!-- Section 3: Document Translation -->
+                <div class="document-section" id="combinedTranslateSection" style="border-color: #10b981; background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); margin-bottom: 20px;">
+                    <h3 style="font-size: 1.3em; color: #065f46; margin-bottom: 10px;">📄 Step 3: Document Translation</h3>
+                    <p style="margin-bottom: 20px; font-size: 0.95em; color: #047857;">
+                        Upload estimation document in Sinhala to translate and extract cost data
+                    </p>
+                    <div class="file-input-wrapper">
+                        <input type="file" id="combinedTranslateInput" class="file-input" accept=".pdf,.png,.jpg,.jpeg">
+                        <label for="combinedTranslateInput" class="doc-input-label" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
+                            📎 Upload Estimation Document
+                        </label>
+                    </div>
+                    <p style="margin-top: 10px; font-size: 0.8em; color: #047857;">Supported: PDF, PNG, JPG, JPEG</p>
+                    <div class="doc-file-info" id="combinedTranslateFileInfo" style="border-color: #10b981; background: #ecfdf5;">
+                        <div class="file-name" id="combinedTranslateFileName" style="font-weight: 600; color: #065f46;"></div>
+                        <div class="file-size" id="combinedTranslateFileSize" style="color: #047857; font-size: 0.9em;"></div>
+                        <!-- Image/PDF Preview -->
+                        <div id="combinedTranslatePreview" style="margin-top: 15px; display: none;">
+                            <p style="color: #065f46; font-size: 0.85em; margin-bottom: 8px;">📄 Preview (click to enlarge):</p>
+                            <div style="position: relative; display: inline-block;">
+                                <img id="combinedTranslatePreviewImg" src="" alt="Preview" class="preview-thumbnail" onclick="openImageModal(this.src, combinedTranslateFileName.textContent)" style="max-width: 100%; max-height: 200px; border-radius: 8px; border: 2px solid #10b981; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.2);">
+                            </div>
+                            <p id="combinedTranslatePdfNote" style="display: none; color: #047857; font-size: 0.8em; margin-top: 5px;">📋 PDF file selected - preview not available</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Comparison Mode Toggle -->
+                <div style="margin-top: 15px; padding: 12px 18px; background: rgba(16, 185, 129, 0.1); border-radius: 10px; border: 1px solid rgba(16, 185, 129, 0.3);">
+                    <label style="display: flex; align-items: center; gap: 12px; cursor: pointer; color: #065f46;">
+                        <input type="checkbox" id="comparisonModeToggle" onchange="toggleComparisonMode()" style="width: 18px; height: 18px; accent-color: #10b981; cursor: pointer;">
+                        <span style="font-weight: 600;">🔄 Compare Google Vision vs OpenAI</span>
+                        <span style="font-size: 0.8em; color: #047857; font-weight: normal;">(Run both and compare side-by-side)</span>
+                    </label>
+                </div>
+                
+                <!-- Translation Loading & Results -->
+                <div class="loading" id="combinedTranslateLoading" style="background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border: 2px solid #10b981;">
+                    <div class="spinner" style="border-top-color: #10b981;"></div>
+                    <h3 style="color: #065f46;" id="translateLoadingTitle">Translating document...</h3>
+                    <p style="color: #047857;" id="translateLoadingSubtitle">Extracting and translating estimation data</p>
+                </div>
+                <div class="translation-results" id="combinedTranslateResults" style="border-color: #10b981; background: #111827;">
+                    <div class="translation-results-header" style="background: linear-gradient(135deg, #10b981 0%, #059669 100%);">
+                        <h3>📄 Translation & Cost Estimation</h3>
+                    </div>
+                    <div class="translation-content" id="combinedTranslateContent" style="background: #111827; padding: 20px;"></div>
+                </div>
+                
+                <!-- Comparison Results Container (hidden by default) -->
+                <div id="comparisonResultsContainer" style="display: none; margin-top: 20px;">
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
+                        <!-- Google Vision Results -->
+                        <div style="border-radius: 15px; overflow: hidden; border: 2px solid #4285f4;">
+                            <div style="background: linear-gradient(135deg, #4285f4 0%, #1a73e8 100%); padding: 15px 20px;">
+                                <h3 style="color: white; margin: 0; display: flex; align-items: center; gap: 10px;">
+                                    <span style="font-size: 1.3em;">🔵</span> Google Cloud Vision
+                                    <span id="googleVisionTime" style="font-size: 0.7em; background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 12px; margin-left: auto;"></span>
+                                </h3>
+                            </div>
+                            <div id="googleVisionContent" style="background: #111827; padding: 20px; min-height: 200px;"></div>
+                        </div>
+                        
+                        <!-- OpenAI Results -->
+                        <div style="border-radius: 15px; overflow: hidden; border: 2px solid #10b981;">
+                            <div style="background: linear-gradient(135deg, #10b981 0%, #059669 100%); padding: 15px 20px;">
+                                <h3 style="color: white; margin: 0; display: flex; align-items: center; gap: 10px;">
+                                    <span style="font-size: 1.3em;">🟢</span> OpenAI GPT-4 Vision
+                                    <span id="openaiVisionTime" style="font-size: 0.7em; background: rgba(255,255,255,0.2); padding: 4px 10px; border-radius: 12px; margin-left: auto;"></span>
+                                </h3>
+                            </div>
+                            <div id="openaiVisionContent" style="background: #111827; padding: 20px; min-height: 200px;"></div>
+                        </div>
+                    </div>
+                    
+                    <!-- Comparison Summary -->
+                    <div id="comparisonSummary" style="margin-top: 20px; padding: 20px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 15px; border: 2px solid #6366f1; display: none;">
+                        <h4 style="color: #a5b4fc; margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+                            <span>📊</span> Comparison Summary
+                        </h4>
+                        <div id="comparisonSummaryContent" style="color: #e5e7eb;"></div>
+                    </div>
+                </div>
+                
+                <!-- Single Analyze All Button - At Bottom -->
+                <div style="text-align: center; margin: 30px 0; padding: 25px; background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%); border-radius: 15px; border: 2px solid #3b82f6;">
+                    <p style="color: #94a3b8; margin-bottom: 15px; font-size: 0.95em;">Upload your files above, then click the button below to analyze all at once</p>
+                    
+                    <!-- Timer Display -->
+                    <div id="analysisTimer" style="display: none; margin-bottom: 15px;">
+                        <div style="display: inline-flex; align-items: center; gap: 10px; background: rgba(59, 130, 246, 0.2); padding: 10px 20px; border-radius: 25px;">
+                            <span style="color: #60a5fa; font-size: 1.5em;">⏱️</span>
+                            <span id="timerDisplay" style="color: #60a5fa; font-size: 1.3em; font-weight: 600; font-family: 'Courier New', monospace;">00:00</span>
+                        </div>
+                    </div>
+                    
+                    <!-- Buttons Container -->
+                    <div style="display: flex; justify-content: center; gap: 15px; flex-wrap: wrap;">
+                        <button class="analyze-btn" id="combinedAnalyzeAllBtn" onclick="runCombinedAnalysisAll()" disabled style="display: inline-block; background: linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%); padding: 18px 50px; font-size: 1.2em; border-radius: 30px; box-shadow: 0 4px 15px rgba(59, 130, 246, 0.4);">
+                            🚀 Analyze All Documents
+                        </button>
+                        <button id="clearAllBtn" onclick="clearAllUploads()" style="display: none; padding: 18px 35px; font-size: 1.1em; border-radius: 30px; border: 2px solid #ef4444; background: transparent; color: #ef4444; cursor: pointer; font-weight: 600; transition: all 0.3s ease;">
+                            🗑️ Clear All
+                        </button>
+                    </div>
+                    
+                    <p id="combinedAnalyzeStatus" style="color: #64748b; margin-top: 12px; font-size: 0.85em;">No files uploaded yet</p>
+                    
+                    <!-- Analysis Time Summary -->
+                    <div id="analysisTimeSummary" style="display: none; margin-top: 15px; padding: 15px; background: rgba(16, 185, 129, 0.1); border-radius: 10px; border: 1px solid #10b981;">
+                        <p style="color: #10b981; margin: 0; font-size: 0.95em;">
+                            <strong>⏱️ Total Analysis Time:</strong> <span id="totalTimeDisplay">0.0s</span>
+                        </p>
+                        <div id="individualTimes" style="margin-top: 8px; font-size: 0.85em; color: #6ee7b7;"></div>
+                    </div>
+                </div>
             </div>
 
             <!-- Annotation editor overlay (for manual correction) -->
@@ -591,7 +1370,44 @@ HTML_TEMPLATE = '''
         const resultsContent = document.getElementById('resultsContent');
 
         let selectedFile = null;
+        let selectedDocFile = null;
         let vehicleData = { makes: [], years: [] };
+
+        // Tab switching functionality
+        function switchTab(tabName) {
+            // Remove active class from all tabs and content
+            document.querySelectorAll('.tab-button').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+
+            // Get header elements
+            const header = document.getElementById('pageHeader');
+            const headerTitle = document.getElementById('headerTitle');
+            const headerSubtitle = document.getElementById('headerSubtitle');
+
+            // Add active class to selected tab and content, update header
+            if (tabName === 'damage') {
+                document.getElementById('tabDamage').classList.add('active');
+                document.getElementById('tabContentDamage').classList.add('active');
+                // Update header for Damage Detection
+                headerTitle.textContent = '🚗 Vehicle Damage Detection';
+                headerSubtitle.textContent = 'AI-Powered Insurance Assessment System';
+                header.style.background = 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)';
+            } else if (tabName === 'translation') {
+                document.getElementById('tabTranslation').classList.add('active');
+                document.getElementById('tabContentTranslation').classList.add('active');
+                // Update header for Document Translation
+                headerTitle.textContent = '📄 Document Translation';
+                headerSubtitle.textContent = 'Translate & Extract Estimation Data from Documents';
+                header.style.background = 'linear-gradient(135deg, #10b981 0%, #059669 100%)';
+            } else if (tabName === 'combined') {
+                document.getElementById('tabCombined').classList.add('active');
+                document.getElementById('tabContentCombined').classList.add('active');
+                // Update header for Complete Analysis
+                headerTitle.textContent = '📋 Complete Analysis';
+                headerSubtitle.textContent = 'Damage Detection + Document Translation + Vehicle Info';
+                header.style.background = 'linear-gradient(135deg, #f59e0b 0%, #d97706 100%)';
+            }
+        }
         let annotationEditorState = {
             imageUrl: null,
             image: null,
@@ -725,10 +1541,1387 @@ HTML_TEMPLATE = '''
         // Load vehicle data when page loads
         loadVehicleData();
 
-        // File input change
+        // File input change (for vehicle images)
         fileInput.addEventListener('change', function(e) {
             handleFile(e.target.files[0]);
         });
+
+        // Document file input elements
+        const docFileInput = document.getElementById('docFileInput');
+        const documentSection = document.getElementById('documentSection');
+        const docFileInfo = document.getElementById('docFileInfo');
+        const docFileName = document.getElementById('docFileName');
+        const docFileSize = document.getElementById('docFileSize');
+        const translateBtn = document.getElementById('translateBtn');
+        const docLoading = document.getElementById('docLoading');
+        const translationResults = document.getElementById('translationResults');
+        const translationContent = document.getElementById('translationContent');
+
+        // Document file input change
+        docFileInput.addEventListener('change', function(e) {
+            handleDocFile(e.target.files[0]);
+        });
+
+        // Document drag and drop
+        documentSection.addEventListener('dragover', function(e) {
+            e.preventDefault();
+            documentSection.classList.add('dragover');
+        });
+
+        documentSection.addEventListener('dragleave', function(e) {
+            e.preventDefault();
+            documentSection.classList.remove('dragover');
+        });
+
+        documentSection.addEventListener('drop', function(e) {
+            e.preventDefault();
+            documentSection.classList.remove('dragover');
+            const file = e.dataTransfer.files[0];
+            if (file) {
+                docFileInput.files = e.dataTransfer.files;
+                handleDocFile(file);
+            }
+        });
+
+        function handleDocFile(file) {
+            if (!file) return;
+
+            selectedDocFile = file;
+            docFileName.textContent = file.name;
+            docFileSize.textContent = formatFileSize(file.size);
+            docFileInfo.classList.add('show');
+            translateBtn.disabled = false;
+            translationResults.classList.remove('show');
+        }
+
+        // Provider selector change handler
+        document.getElementById('ocrProvider').addEventListener('change', function() {
+            const providerNote = document.getElementById('providerNote');
+            if (this.value === 'google') {
+                providerNote.textContent = 'Google Cloud Vision with Google Translate for OCR and translation';
+            } else {
+                providerNote.textContent = 'GPT-4 Vision provides excellent OCR with intelligent data extraction';
+            }
+        });
+
+        async function translateDocument() {
+            if (!selectedDocFile) return;
+
+            // Hide results, show loading
+            translationResults.classList.remove('show');
+            docLoading.classList.add('show');
+            translateBtn.disabled = true;
+
+            const formData = new FormData();
+            formData.append('document', selectedDocFile);
+            
+            // Add selected OCR provider
+            const provider = document.getElementById('ocrProvider').value;
+            formData.append('provider', provider);
+
+            try {
+                const response = await fetch('/api/translate-document', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const data = await response.json();
+
+                if (data.error) {
+                    showTranslationError(data.error);
+                } else {
+                    // Add provider info to display
+                    if (data.provider) {
+                        data.providerUsed = data.provider;
+                    }
+                    displayTranslationResults(data);
+                }
+            } catch (error) {
+                showTranslationError('An error occurred while translating the document: ' + error.message);
+            } finally {
+                docLoading.classList.remove('show');
+                translateBtn.disabled = false;
+            }
+        }
+
+        // ========== COMPLETE ANALYSIS TAB - 3 SECTIONS ==========
+        
+        // Declare all file variables upfront so they're available to all functions
+        let selectedCombinedDamageFile = null;
+        let selectedCombinedVehicleFile = null;
+        let selectedCombinedTranslateFile = null;
+        
+        // Section 1: Damage Detection elements
+        const combinedDamageInput = document.getElementById('combinedDamageInput');
+        const combinedDamageSection = document.getElementById('combinedDamageSection');
+        const combinedDamageFileInfo = document.getElementById('combinedDamageFileInfo');
+        const combinedDamageFileName = document.getElementById('combinedDamageFileName');
+        const combinedDamageFileSize = document.getElementById('combinedDamageFileSize');
+        const combinedDamageLoading = document.getElementById('combinedDamageLoading');
+        const combinedDamageResults = document.getElementById('combinedDamageResults');
+        const combinedDamageContent = document.getElementById('combinedDamageContent');
+        
+        // Section 2: Vehicle Details elements
+        const combinedVehicleInput = document.getElementById('combinedVehicleInput');
+        const combinedVehicleFileInfo = document.getElementById('combinedVehicleFileInfo');
+        const combinedVehicleFileName = document.getElementById('combinedVehicleFileName');
+        const combinedVehicleFileSize = document.getElementById('combinedVehicleFileSize');
+        const combinedVehicleLoading = document.getElementById('combinedVehicleLoading');
+        const combinedVehicleResults = document.getElementById('combinedVehicleResults');
+        const combinedVehicleContent = document.getElementById('combinedVehicleContent');
+        
+        // Section 3: Document Translation elements
+        const combinedTranslateInput = document.getElementById('combinedTranslateInput');
+        const combinedTranslateFileInfo = document.getElementById('combinedTranslateFileInfo');
+        const combinedTranslateFileName = document.getElementById('combinedTranslateFileName');
+        const combinedTranslateFileSize = document.getElementById('combinedTranslateFileSize');
+        const combinedTranslateLoading = document.getElementById('combinedTranslateLoading');
+        const combinedTranslateResults = document.getElementById('combinedTranslateResults');
+        const combinedTranslateContent = document.getElementById('combinedTranslateContent');
+        
+        // Single Analyze All button
+        const combinedAnalyzeAllBtn = document.getElementById('combinedAnalyzeAllBtn');
+        const combinedAnalyzeStatus = document.getElementById('combinedAnalyzeStatus');
+        const clearAllBtn = document.getElementById('clearAllBtn');
+        
+        // Timer variables
+        let analysisTimerInterval = null;
+        let analysisStartTime = null;
+        const analysisTimes = {
+            damage: null,
+            vehicle: null,
+            translate: null
+        };
+        
+        // Timer functions
+        function startTimer() {
+            analysisStartTime = Date.now();
+            const timerDiv = document.getElementById('analysisTimer');
+            const timerDisplay = document.getElementById('timerDisplay');
+            timerDiv.style.display = 'block';
+            
+            analysisTimerInterval = setInterval(() => {
+                const elapsed = Date.now() - analysisStartTime;
+                const seconds = Math.floor(elapsed / 1000);
+                const minutes = Math.floor(seconds / 60);
+                const displaySeconds = seconds % 60;
+                timerDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(displaySeconds).padStart(2, '0')}`;
+            }, 100);
+        }
+        
+        function stopTimer() {
+            if (analysisTimerInterval) {
+                clearInterval(analysisTimerInterval);
+                analysisTimerInterval = null;
+            }
+            return analysisStartTime ? (Date.now() - analysisStartTime) / 1000 : 0;
+        }
+        
+        function showTimeSummary(totalTime) {
+            const summaryDiv = document.getElementById('analysisTimeSummary');
+            const totalDisplay = document.getElementById('totalTimeDisplay');
+            const individualDiv = document.getElementById('individualTimes');
+            
+            totalDisplay.textContent = `${totalTime.toFixed(1)}s`;
+            
+            let individualHtml = '';
+            if (analysisTimes.damage !== null) {
+                individualHtml += `<span style="margin-right: 15px;">🔍 Damage: ${analysisTimes.damage.toFixed(1)}s</span>`;
+            }
+            if (analysisTimes.vehicle !== null) {
+                individualHtml += `<span style="margin-right: 15px;">📋 Vehicle: ${analysisTimes.vehicle.toFixed(1)}s</span>`;
+            }
+            if (analysisTimes.translate !== null) {
+                individualHtml += `<span>🌐 Translation: ${analysisTimes.translate.toFixed(1)}s</span>`;
+            }
+            individualDiv.innerHTML = individualHtml;
+            summaryDiv.style.display = 'block';
+        }
+        
+        // Clear all uploads function
+        function clearAllUploads() {
+            // Reset file variables
+            selectedCombinedDamageFile = null;
+            selectedCombinedVehicleFile = null;
+            selectedCombinedTranslateFile = null;
+            
+            // Reset file inputs
+            combinedDamageInput.value = '';
+            combinedVehicleInput.value = '';
+            combinedTranslateInput.value = '';
+            
+            // Hide file info displays
+            combinedDamageFileInfo.classList.remove('show');
+            combinedVehicleFileInfo.classList.remove('show');
+            combinedTranslateFileInfo.classList.remove('show');
+            
+            // Hide image previews
+            document.getElementById('combinedDamagePreview').style.display = 'none';
+            document.getElementById('combinedVehiclePreview').style.display = 'none';
+            document.getElementById('combinedTranslatePreview').style.display = 'none';
+            
+            // Hide results
+            combinedDamageResults.classList.remove('show');
+            combinedVehicleResults.classList.remove('show');
+            combinedTranslateResults.classList.remove('show');
+            
+            // Clear result content
+            document.getElementById('combinedDamageContent').innerHTML = '';
+            document.getElementById('combinedVehicleContent').innerHTML = '';
+            document.getElementById('combinedTranslateContent').innerHTML = '';
+            
+            // Hide comparison results
+            document.getElementById('comparisonResultsContainer').style.display = 'none';
+            document.getElementById('comparisonModeToggle').checked = false;
+            comparisonModeEnabled = false;
+            
+            // Hide timer and summary
+            document.getElementById('analysisTimer').style.display = 'none';
+            document.getElementById('analysisTimeSummary').style.display = 'none';
+            document.getElementById('timerDisplay').textContent = '00:00';
+            
+            // Reset timer data
+            analysisTimes.damage = null;
+            analysisTimes.vehicle = null;
+            analysisTimes.translate = null;
+            
+            // Hide clear button
+            clearAllBtn.style.display = 'none';
+            
+            // Update button state
+            updateCombinedAnalyzeButton();
+            
+            // Show confirmation
+            combinedAnalyzeStatus.innerHTML = '<span style="color: #10b981;">✓ All cleared! Ready for new uploads.</span>';
+            setTimeout(() => {
+                combinedAnalyzeStatus.textContent = 'No files uploaded yet';
+            }, 2000);
+        }
+        
+        // Function to update the single analyze button state
+        function updateCombinedAnalyzeButton() {
+            const filesSelected = [];
+            if (selectedCombinedDamageFile) filesSelected.push('Damage Image');
+            if (selectedCombinedVehicleFile) filesSelected.push('Vehicle Document');
+            if (selectedCombinedTranslateFile) filesSelected.push('Estimation Document');
+            
+            if (filesSelected.length > 0) {
+                combinedAnalyzeAllBtn.disabled = false;
+                combinedAnalyzeAllBtn.style.opacity = '1';
+                combinedAnalyzeStatus.innerHTML = `<span style="color: #10b981;">✓ Ready to analyze:</span> ${filesSelected.join(', ')}`;
+                clearAllBtn.style.display = 'inline-block';
+            } else {
+                combinedAnalyzeAllBtn.disabled = true;
+                combinedAnalyzeAllBtn.style.opacity = '0.5';
+                combinedAnalyzeStatus.textContent = 'No files uploaded yet';
+                clearAllBtn.style.display = 'none';
+            }
+        }
+        
+        // Function to run all analyses at once
+        async function runCombinedAnalysisAll() {
+            if (!selectedCombinedDamageFile && !selectedCombinedVehicleFile && !selectedCombinedTranslateFile) {
+                alert('Please upload at least one file to analyze.');
+                return;
+            }
+            
+            // Reset individual times
+            analysisTimes.damage = null;
+            analysisTimes.vehicle = null;
+            analysisTimes.translate = null;
+            
+            // Hide previous summary
+            document.getElementById('analysisTimeSummary').style.display = 'none';
+            
+            combinedAnalyzeAllBtn.disabled = true;
+            clearAllBtn.style.display = 'none';
+            combinedAnalyzeStatus.innerHTML = '<span style="color: #3b82f6;">⏳ Analyzing all documents...</span>';
+            
+            // Start the timer
+            startTimer();
+            
+            const promises = [];
+            
+            // Run damage detection if file is uploaded
+            if (selectedCombinedDamageFile) {
+                promises.push(runCombinedDamageDetectionTimed());
+            }
+            
+            // Run vehicle extraction if file is uploaded
+            if (selectedCombinedVehicleFile) {
+                promises.push(runCombinedVehicleExtractionTimed());
+            }
+            
+            // Run translation if file is uploaded
+            if (selectedCombinedTranslateFile) {
+                promises.push(runCombinedTranslationTimed());
+            }
+            
+            // Wait for all analyses to complete
+            try {
+                await Promise.all(promises);
+                const totalTime = stopTimer();
+                combinedAnalyzeStatus.innerHTML = '<span style="color: #10b981;">✓ All analyses completed!</span>';
+                showTimeSummary(totalTime);
+            } catch (error) {
+                stopTimer();
+                combinedAnalyzeStatus.innerHTML = '<span style="color: #ef4444;">⚠️ Some analyses encountered errors</span>';
+            } finally {
+                combinedAnalyzeAllBtn.disabled = false;
+                clearAllBtn.style.display = 'inline-block';
+            }
+        }
+        
+        // Timed wrapper functions
+        async function runCombinedDamageDetectionTimed() {
+            const start = Date.now();
+            await runCombinedDamageDetection();
+            analysisTimes.damage = (Date.now() - start) / 1000;
+        }
+        
+        async function runCombinedVehicleExtractionTimed() {
+            const start = Date.now();
+            await runCombinedVehicleExtraction();
+            analysisTimes.vehicle = (Date.now() - start) / 1000;
+        }
+        
+        async function runCombinedTranslationTimed() {
+            const start = Date.now();
+            await runCombinedTranslation();
+            analysisTimes.translate = (Date.now() - start) / 1000;
+        }
+        
+        combinedDamageInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                selectedCombinedDamageFile = file;
+                combinedDamageFileName.textContent = file.name;
+                combinedDamageFileSize.textContent = formatFileSize(file.size);
+                combinedDamageFileInfo.classList.add('show');
+                
+                // Show image preview
+                const previewDiv = document.getElementById('combinedDamagePreview');
+                const previewImg = document.getElementById('combinedDamagePreviewImg');
+                const reader = new FileReader();
+                reader.onload = function(event) {
+                    previewImg.src = event.target.result;
+                    previewDiv.style.display = 'block';
+                };
+                reader.readAsDataURL(file);
+                
+                updateCombinedAnalyzeButton();
+            }
+        });
+        
+        async function runCombinedDamageDetection() {
+            if (!selectedCombinedDamageFile) return;
+            
+            combinedDamageResults.classList.remove('show');
+            combinedDamageLoading.classList.add('show');
+            
+            const formData = new FormData();
+            formData.append('file', selectedCombinedDamageFile);
+            
+            try {
+                const response = await fetch('/api/analyze', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    combinedDamageContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(data.error)}</div>`;
+                } else {
+                    displayCombinedDamageResults(data);
+                }
+            } catch (error) {
+                combinedDamageContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(error.message)}</div>`;
+            } finally {
+                combinedDamageLoading.classList.remove('show');
+                combinedDamageResults.classList.add('show');
+            }
+        }
+        
+        function displayCombinedDamageResults(data) {
+            let html = '';
+            
+            // Show annotated image (API returns 'annotated_url') or original image as fallback
+            if (data.annotated_url) {
+                html += `<div style="text-align: center; margin-bottom: 20px;">
+                    <h4 style="color: #e5e7eb; margin-bottom: 10px; font-size: 1em;">🖼️ Annotated Image with Damage Highlights</h4>
+                    <img src="${data.annotated_url}" alt="Annotated damage" style="max-width: 100%; border-radius: 10px; border: 2px solid #8b5cf6; box-shadow: 0 4px 15px rgba(139, 92, 246, 0.3);">
+                </div>`;
+            } else if (data.preview_url) {
+                // Fallback to original image if annotated image not available
+                html += `<div style="text-align: center; margin-bottom: 20px;">
+                    <h4 style="color: #e5e7eb; margin-bottom: 10px; font-size: 1em;">🖼️ Uploaded Image</h4>
+                    <img src="${data.preview_url}" alt="Vehicle image" style="max-width: 100%; border-radius: 10px; border: 2px solid #6b7280; box-shadow: 0 4px 15px rgba(107, 114, 128, 0.3);">
+                    <p style="color: #9ca3af; font-size: 0.85em; margin-top: 8px;">Note: Annotated image with damage boxes not available</p>
+                </div>`;
+            }
+            
+            // Get damages from parsed data (API returns 'parsed.damages')
+            const damages = data.parsed?.damages || data.damages || [];
+            const damageFound = data.parsed?.damage_found !== false;
+            
+            if (damages.length > 0) {
+                html += '<div style="margin-bottom: 15px;"><strong style="color: #6d28d9;">Detected Damages:</strong></div>';
+                
+                // Show damage cards with details
+                html += '<div style="display: flex; flex-direction: column; gap: 12px; margin-bottom: 20px;">';
+                damages.forEach((damage, index) => {
+                    const damageType = damage.type || damage.label || 'Unknown Damage';
+                    const severity = damage.severity || damage.extent || 'Unknown';
+                    const location = damage.location || '';
+                    const cost = damage.estimated_cost_inr;
+                    
+                    const severityColors = { 'Minor': '#10b981', 'Moderate': '#f59e0b', 'Severe': '#ef4444', 'Critical': '#dc2626' };
+                    const sevColor = severityColors[severity] || '#6b7280';
+                    
+                    html += `<div style="background: #1f2937; padding: 15px; border-radius: 10px; border-left: 4px solid ${sevColor};">`;
+                    html += `<div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">`;
+                    html += `<span style="background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%); color: white; padding: 8px 15px; border-radius: 20px; font-size: 0.95em; font-weight: 500;">${escapeHtml(damageType)}</span>`;
+                    html += `<span style="color: ${sevColor}; font-weight: 600;">Severity: ${escapeHtml(severity)}</span>`;
+                    html += `</div>`;
+                    if (location) {
+                        html += `<p style="color: #9ca3af; margin-top: 8px; font-size: 0.9em;">📍 Location: ${escapeHtml(location)}</p>`;
+                    }
+                    if (cost) {
+                        html += `<p style="color: #60a5fa; margin-top: 5px; font-weight: 600;">💰 Estimated Cost: ₹${escapeHtml(cost.toLocaleString())}</p>`;
+                    }
+                    html += '</div>';
+                });
+                html += '</div>';
+            } else if (!damageFound) {
+                html += '<div style="background: #064e3b; padding: 20px; border-radius: 10px; text-align: center;">';
+                html += '<p style="color: #10b981; font-size: 1.1em; font-weight: 500;">✓ No damage detected</p>';
+                html += '<p style="color: #9ca3af; font-size: 0.9em; margin-top: 5px;">The vehicle appears to be in good condition.</p>';
+                html += '</div>';
+            }
+            
+            // Show report (API returns 'raw_report')
+            if (data.raw_report) {
+                html += `<div style="margin-top: 15px; padding: 15px; background: #1f2937; border-radius: 10px; color: #e5e7eb; white-space: pre-wrap; font-size: 0.9em;">${escapeHtml(data.raw_report)}</div>`;
+            }
+            
+            combinedDamageContent.innerHTML = html || '<p style="color: #9ca3af; text-align: center; padding: 20px;">No results to display.</p>';
+        }
+        
+        // Section 2: Vehicle Details Extraction - event handler
+        combinedVehicleInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                selectedCombinedVehicleFile = file;
+                combinedVehicleFileName.textContent = file.name;
+                combinedVehicleFileSize.textContent = formatFileSize(file.size);
+                combinedVehicleFileInfo.classList.add('show');
+                
+                // Show preview
+                const previewDiv = document.getElementById('combinedVehiclePreview');
+                const previewImg = document.getElementById('combinedVehiclePreviewImg');
+                const pdfNote = document.getElementById('combinedVehiclePdfNote');
+                
+                const fileExt = file.name.split('.').pop().toLowerCase();
+                if (fileExt === 'pdf') {
+                    previewImg.style.display = 'none';
+                    pdfNote.style.display = 'block';
+                    previewDiv.style.display = 'block';
+                } else {
+                    const reader = new FileReader();
+                    reader.onload = function(event) {
+                        previewImg.src = event.target.result;
+                        previewImg.style.display = 'block';
+                        pdfNote.style.display = 'none';
+                        previewDiv.style.display = 'block';
+                    };
+                    reader.readAsDataURL(file);
+                }
+                
+                updateCombinedAnalyzeButton();
+            }
+        });
+        
+        async function runCombinedVehicleExtraction() {
+            if (!selectedCombinedVehicleFile) return;
+            
+            combinedVehicleResults.classList.remove('show');
+            combinedVehicleLoading.classList.add('show');
+            
+            const formData = new FormData();
+            formData.append('file', selectedCombinedVehicleFile);
+            
+            try {
+                const response = await fetch('/api/extract-vehicle-info', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                // Check if response is OK before parsing JSON
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    console.error('[Vehicle Extraction] Server error:', response.status, errorText);
+                    combinedVehicleContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Server Error (${response.status}): Please check server logs for details.</div>`;
+                    return;
+                }
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    combinedVehicleContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(data.error)}</div>`;
+                } else {
+                    displayCombinedVehicleResults(data);
+                }
+            } catch (error) {
+                console.error('[Vehicle Extraction] Fetch error:', error);
+                combinedVehicleContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(error.message)}</div>`;
+            } finally {
+                combinedVehicleLoading.classList.remove('show');
+                combinedVehicleResults.classList.add('show');
+            }
+        }
+        
+        function displayCombinedVehicleResults(data) {
+            console.log('[Vehicle Details] Received data:', data);  // Debug logging
+            let html = '';
+            let hasAnyData = false;
+            
+            // Summary section at top
+            if (data.summary) {
+                hasAnyData = true;
+                html += `<div style="background: linear-gradient(135deg, #1e3a5f 0%, #1e293b 100%); padding: 20px; border-radius: 12px; margin-bottom: 20px; border-left: 4px solid #f59e0b;">
+                    <p style="color: #e5e7eb; font-size: 1.05em; line-height: 1.6; margin: 0;">${escapeHtml(data.summary)}</p>
+                </div>`;
+            }
+            
+            // Helper function to render a section
+            function renderSection(title, icon, items, accentColor) {
+                let hasItems = items.some(item => item.value && item.value !== 'null' && item.value !== null);
+                if (!hasItems) return '';
+                
+                let sectionHtml = `<div style="margin-bottom: 20px;">
+                    <h4 style="color: ${accentColor}; margin-bottom: 12px; font-size: 1.1em; display: flex; align-items: center; gap: 8px;">
+                        <span>${icon}</span> ${title}
+                    </h4>
+                    <ul style="list-style: none; padding: 0; margin: 0;">`;
+                
+                items.forEach(item => {
+                    if (item.value && item.value !== 'null' && item.value !== null) {
+                        let displayValue = item.value;
+                        // Handle arrays
+                        if (Array.isArray(item.value)) {
+                            displayValue = item.value.join(', ');
+                        }
+                        sectionHtml += `<li style="color: #e5e7eb; padding: 6px 0; border-bottom: 1px solid rgba(255,255,255,0.05);">
+                            <strong style="color: #f59e0b;">${item.label}:</strong> ${escapeHtml(String(displayValue))}
+                        </li>`;
+                    }
+                });
+                
+                sectionHtml += '</ul></div>';
+                return sectionHtml;
+            }
+            
+            // Document Info Section
+            if (data.document_info) {
+                const docInfo = data.document_info;
+                html += renderSection('Document Information', '📋', [
+                    { label: 'Reference No', value: docInfo.reference_number },
+                    { label: 'Policy No', value: docInfo.policy_number },
+                    { label: 'Document Type', value: docInfo.document_type },
+                    { label: 'Date', value: docInfo.date }
+                ], '#60a5fa');
+            }
+            
+            // Accident Details Section
+            if (data.accident_details) {
+                const accident = data.accident_details;
+                html += renderSection('Accident Intimation Details', '🚨', [
+                    { label: 'Date and Time of Accident', value: accident.date_time },
+                    { label: 'Location', value: accident.location },
+                    { label: 'Police Division', value: accident.police_division },
+                    { label: 'Area Contact', value: accident.area_contact },
+                    { label: 'Accident Description', value: accident.description }
+                ], '#ef4444');
+            }
+            
+            // Vehicle Info Section
+            if (data.vehicle_info) {
+                const vehicle = data.vehicle_info;
+                html += renderSection('Vehicle Information', '🚗', [
+                    { label: 'Registration', value: vehicle.registration },
+                    { label: 'Type & Color', value: vehicle.type_color },
+                    { label: 'Make', value: vehicle.make },
+                    { label: 'Model', value: vehicle.model },
+                    { label: 'Year', value: vehicle.year },
+                    { label: 'VIN/Chassis', value: vehicle.vin },
+                    { label: 'Engine', value: vehicle.engine }
+                ], '#10b981');
+            }
+            
+            // Driver Info Section
+            if (data.driver_info) {
+                const driver = data.driver_info;
+                html += renderSection('Driver Information', '👤', [
+                    { label: 'Driver Name', value: driver.name },
+                    { label: 'Driver Age', value: driver.age },
+                    { label: 'NIC/ID', value: driver.nic },
+                    { label: 'License Number', value: driver.license_number },
+                    { label: 'License Expiry', value: driver.license_expiry },
+                    { label: 'License Class', value: driver.license_class },
+                    { label: 'Usage', value: data.additional_info?.usage }
+                ], '#8b5cf6');
+            }
+            
+            // Damage Info Section
+            if (data.damage_info) {
+                const damage = data.damage_info;
+                html += renderSection('Damage Information', '⚠️', [
+                    { label: 'Damaged Items (Vehicle)', value: damage.vehicle_damages },
+                    { label: 'Damages to Goods', value: damage.goods_damage },
+                    { label: 'Personal Injuries', value: damage.personal_injuries },
+                    { label: 'Third Party Damages', value: damage.third_party_damage },
+                    { label: 'Third Party Vehicles', value: damage.third_party_vehicles },
+                    { label: 'Property Damage', value: damage.property_damage }
+                ], '#f59e0b');
+            }
+            
+            // Additional Info Section
+            if (data.additional_info) {
+                const additional = data.additional_info;
+                html += renderSection('Additional Details', '📝', [
+                    { label: 'Customer/Owner', value: additional.customer_name },
+                    { label: 'Contact', value: additional.contact },
+                    { label: 'Category', value: additional.category },
+                    { label: 'Remarks', value: additional.remarks }
+                ], '#6366f1');
+            }
+            
+            // Check if any sections were rendered
+            if (html.trim()) {
+                hasAnyData = true;
+            }
+            
+            // Fallback for old format or no data
+            if (!hasAnyData) {
+                // Try old format with vehicle_info
+                const vehicleInfo = data.vehicle_info || data;
+                const fields = [
+                    { key: 'make', label: 'Make' },
+                    { key: 'model', label: 'Model' },
+                    { key: 'year', label: 'Year' },
+                    { key: 'color', label: 'Color' },
+                    { key: 'registration', label: 'Registration' },
+                    { key: 'owner', label: 'Owner' },
+                    { key: 'insurance_policy', label: 'Policy No' },
+                    { key: 'vin', label: 'VIN' },
+                    { key: 'chassis', label: 'Chassis' }
+                ];
+                
+                let hasData = false;
+                let gridHtml = '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 15px;">';
+                fields.forEach(field => {
+                    if (vehicleInfo && vehicleInfo[field.key] && vehicleInfo[field.key] !== null && vehicleInfo[field.key] !== 'null') {
+                        hasData = true;
+                        gridHtml += `<div style="background: rgba(251, 191, 36, 0.1); padding: 15px; border-radius: 10px; border-left: 4px solid #fbbf24;">
+                            <span style="color: #9ca3af; font-size: 0.8em; display: block;">${field.label}</span>
+                            <strong style="color: #fbbf24; font-size: 1.15em;">${escapeHtml(vehicleInfo[field.key])}</strong>
+                        </div>`;
+                    }
+                });
+                gridHtml += '</div>';
+                
+                if (hasData) {
+                    html = gridHtml;
+                }
+            }
+            
+            // If we still have no data, show raw_text if available
+            if (!html.trim() && data.raw_text) {
+                html = `<div style="background: #1f2937; padding: 20px; border-radius: 12px; border-left: 4px solid #f59e0b;">
+                    <h4 style="color: #f59e0b; margin-bottom: 15px;">📄 Extracted Text</h4>
+                    <pre style="color: #e5e7eb; white-space: pre-wrap; font-size: 0.9em; line-height: 1.6; margin: 0;">${escapeHtml(data.raw_text)}</pre>
+                </div>`;
+            }
+            
+            // Final fallback - no data at all
+            if (!html.trim()) {
+                html = '<p style="color: #9ca3af; text-align: center; padding: 20px;">No information could be extracted from the document.</p>';
+            }
+            
+            combinedVehicleContent.innerHTML = html;
+        }
+        
+        // Section 3: Document Translation - event handler
+        combinedTranslateInput.addEventListener('change', function(e) {
+            const file = e.target.files[0];
+            if (file) {
+                selectedCombinedTranslateFile = file;
+                combinedTranslateFileName.textContent = file.name;
+                combinedTranslateFileSize.textContent = formatFileSize(file.size);
+                combinedTranslateFileInfo.classList.add('show');
+                
+                // Show preview
+                const previewDiv = document.getElementById('combinedTranslatePreview');
+                const previewImg = document.getElementById('combinedTranslatePreviewImg');
+                const pdfNote = document.getElementById('combinedTranslatePdfNote');
+                
+                const fileExt = file.name.split('.').pop().toLowerCase();
+                if (fileExt === 'pdf') {
+                    previewImg.style.display = 'none';
+                    pdfNote.style.display = 'block';
+                    previewDiv.style.display = 'block';
+                } else {
+                    const reader = new FileReader();
+                    reader.onload = function(event) {
+                        previewImg.src = event.target.result;
+                        previewImg.style.display = 'block';
+                        pdfNote.style.display = 'none';
+                        previewDiv.style.display = 'block';
+                    };
+                    reader.readAsDataURL(file);
+                }
+                
+                updateCombinedAnalyzeButton();
+            }
+        });
+        
+        // Comparison mode state
+        let comparisonModeEnabled = false;
+        
+        function toggleComparisonMode() {
+            comparisonModeEnabled = document.getElementById('comparisonModeToggle').checked;
+            console.log('[Comparison Mode]', comparisonModeEnabled ? 'Enabled' : 'Disabled');
+        }
+        
+        async function runCombinedTranslation() {
+            if (!selectedCombinedTranslateFile) return;
+            
+            // Check if comparison mode is enabled
+            if (comparisonModeEnabled) {
+                await runComparisonTranslation();
+                return;
+            }
+            
+            // Normal single translation mode
+            combinedTranslateResults.classList.remove('show');
+            document.getElementById('comparisonResultsContainer').style.display = 'none';
+            combinedTranslateLoading.classList.add('show');
+            document.getElementById('translateLoadingTitle').textContent = 'Translating document...';
+            document.getElementById('translateLoadingSubtitle').textContent = 'Extracting and translating estimation data';
+            
+            const formData = new FormData();
+            formData.append('document', selectedCombinedTranslateFile);
+            formData.append('provider', 'openai');
+            
+            try {
+                const response = await fetch('/api/translate-document', {
+                    method: 'POST',
+                    body: formData
+                });
+                
+                const data = await response.json();
+                
+                if (data.error) {
+                    combinedTranslateContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(data.error)}</div>`;
+                } else {
+                    displayCombinedTranslateResults(data);
+                }
+            } catch (error) {
+                combinedTranslateContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(error.message)}</div>`;
+            } finally {
+                combinedTranslateLoading.classList.remove('show');
+                combinedTranslateResults.classList.add('show');
+            }
+        }
+        
+        async function runComparisonTranslation() {
+            // Hide normal results, show comparison container
+            combinedTranslateResults.classList.remove('show');
+            combinedTranslateLoading.classList.add('show');
+            document.getElementById('translateLoadingTitle').textContent = 'Running comparison...';
+            document.getElementById('translateLoadingSubtitle').textContent = 'Processing with both Google Vision and OpenAI';
+            
+            const comparisonContainer = document.getElementById('comparisonResultsContainer');
+            const googleContent = document.getElementById('googleVisionContent');
+            const openaiContent = document.getElementById('openaiVisionContent');
+            const googleTime = document.getElementById('googleVisionTime');
+            const openaiTime = document.getElementById('openaiVisionTime');
+            const summaryContainer = document.getElementById('comparisonSummary');
+            const summaryContent = document.getElementById('comparisonSummaryContent');
+            
+            // Reset content
+            googleContent.innerHTML = '<div style="text-align: center; padding: 40px;"><div class="spinner" style="border-top-color: #4285f4; margin: 0 auto;"></div><p style="color: #9ca3af; margin-top: 15px;">Processing with Google Vision...</p></div>';
+            openaiContent.innerHTML = '<div style="text-align: center; padding: 40px;"><div class="spinner" style="border-top-color: #10b981; margin: 0 auto;"></div><p style="color: #9ca3af; margin-top: 15px;">Processing with OpenAI...</p></div>';
+            googleTime.textContent = '';
+            openaiTime.textContent = '';
+            summaryContainer.style.display = 'none';
+            
+            comparisonContainer.style.display = 'block';
+            combinedTranslateLoading.classList.remove('show');
+            
+            // Run both in parallel
+            const googlePromise = runGoogleVisionTranslation();
+            const openaiPromise = runOpenAITranslation();
+            
+            const [googleResult, openaiResult] = await Promise.allSettled([googlePromise, openaiPromise]);
+            
+            // Display Google Vision results
+            if (googleResult.status === 'fulfilled') {
+                const data = googleResult.value;
+                googleTime.textContent = data.time ? `${data.time.toFixed(1)}s` : '';
+                if (data.error) {
+                    googleContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ ${escapeHtml(data.error)}</div>`;
+                } else {
+                    googleContent.innerHTML = formatComparisonResult(data, 'google');
+                }
+            } else {
+                googleContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ ${escapeHtml(googleResult.reason)}</div>`;
+            }
+            
+            // Display OpenAI results
+            if (openaiResult.status === 'fulfilled') {
+                const data = openaiResult.value;
+                openaiTime.textContent = data.time ? `${data.time.toFixed(1)}s` : '';
+                if (data.error) {
+                    openaiContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ ${escapeHtml(data.error)}</div>`;
+                } else {
+                    openaiContent.innerHTML = formatComparisonResult(data, 'openai');
+                }
+            } else {
+                openaiContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ ${escapeHtml(openaiResult.reason)}</div>`;
+            }
+            
+            // Show comparison summary
+            if (googleResult.status === 'fulfilled' && openaiResult.status === 'fulfilled' && 
+                !googleResult.value.error && !openaiResult.value.error) {
+                summaryContainer.style.display = 'block';
+                summaryContent.innerHTML = generateComparisonSummary(googleResult.value, openaiResult.value);
+            }
+        }
+        
+        async function runGoogleVisionTranslation() {
+            const startTime = Date.now();
+            const formData = new FormData();
+            formData.append('document', selectedCombinedTranslateFile);
+            formData.append('provider', 'google');
+            
+            try {
+                const response = await fetch('/api/translate-document', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                data.time = (Date.now() - startTime) / 1000;
+                return data;
+            } catch (error) {
+                return { error: error.message, time: (Date.now() - startTime) / 1000 };
+            }
+        }
+        
+        async function runOpenAITranslation() {
+            const startTime = Date.now();
+            const formData = new FormData();
+            formData.append('document', selectedCombinedTranslateFile);
+            formData.append('provider', 'openai');
+            
+            try {
+                const response = await fetch('/api/translate-document', {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                data.time = (Date.now() - startTime) / 1000;
+                return data;
+            } catch (error) {
+                return { error: error.message, time: (Date.now() - startTime) / 1000 };
+            }
+        }
+        
+        function formatComparisonResult(data, provider) {
+            let html = '';
+            const color = provider === 'google' ? '#4285f4' : '#10b981';
+            
+            if (data.source_language) {
+                html += `<p style="margin-bottom: 15px; color: #e5e7eb;">Language: <strong style="color: ${color};">${escapeHtml(data.source_language)}</strong></p>`;
+            }
+            
+            const tableData = data.table_data || (data.extracted_data && data.extracted_data.table_data) || [];
+            
+            if (tableData.length > 0) {
+                html += `<p style="color: #9ca3af; font-size: 0.85em; margin-bottom: 10px;">📊 ${tableData.length} items extracted</p>`;
+                html += '<div style="max-height: 400px; overflow-y: auto;">';
+                html += '<table style="width: 100%; border-collapse: collapse; font-size: 0.85em;">';
+                html += '<thead><tr style="background: rgba(255,255,255,0.05);">';
+                html += '<th style="text-align: left; padding: 8px; color: #e5e7eb;">Item</th>';
+                html += '<th style="text-align: right; padding: 8px; color: #60a5fa;">Est.</th>';
+                html += '<th style="text-align: right; padding: 8px; color: #f472b6;">Appr.</th>';
+                html += '</tr></thead><tbody>';
+                
+                tableData.forEach((item, i) => {
+                    const desc = item.description || item.item || 'Unknown';
+                    const est = item.estimate || item.estimated || '-';
+                    const app = item.approved || item.actual || '-';
+                    html += `<tr style="border-bottom: 1px solid #374151;">
+                        <td style="padding: 8px; color: #e5e7eb;">${escapeHtml(desc)}</td>
+                        <td style="padding: 8px; color: #60a5fa; text-align: right;">${escapeHtml(String(est))}</td>
+                        <td style="padding: 8px; color: #f472b6; text-align: right;">${escapeHtml(String(app))}</td>
+                    </tr>`;
+                });
+                
+                html += '</tbody></table></div>';
+                
+                // Show totals if available
+                const totals = data.totals || (data.extracted_data && data.extracted_data.totals);
+                if (totals) {
+                    html += `<div style="margin-top: 15px; padding: 12px; background: rgba(255,255,255,0.05); border-radius: 8px;">`;
+                    if (totals.estimate_total) html += `<p style="color: #60a5fa; margin: 5px 0;">Est. Total: <strong>${escapeHtml(String(totals.estimate_total))}</strong></p>`;
+                    if (totals.approved_total) html += `<p style="color: #f472b6; margin: 5px 0;">Approved: <strong>${escapeHtml(String(totals.approved_total))}</strong></p>`;
+                    html += `</div>`;
+                }
+            } else {
+                html += '<p style="color: #9ca3af; text-align: center; padding: 20px;">No table data extracted</p>';
+            }
+            
+            return html;
+        }
+        
+        function generateComparisonSummary(googleData, openaiData) {
+            const googleItems = googleData.table_data || (googleData.extracted_data && googleData.extracted_data.table_data) || [];
+            const openaiItems = openaiData.table_data || (openaiData.extracted_data && openaiData.extracted_data.table_data) || [];
+            
+            const googleTotals = googleData.totals || (googleData.extracted_data && googleData.extracted_data.totals) || {};
+            const openaiTotals = openaiData.totals || (openaiData.extracted_data && openaiData.extracted_data.totals) || {};
+            
+            let html = '<div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px;">';
+            
+            // Items count
+            html += `<div style="background: rgba(66, 133, 244, 0.1); padding: 15px; border-radius: 10px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 0.8em; margin-bottom: 5px;">Items Extracted</p>
+                <p style="font-size: 1.5em; margin: 0;"><span style="color: #4285f4;">${googleItems.length}</span> vs <span style="color: #10b981;">${openaiItems.length}</span></p>
+            </div>`;
+            
+            // Processing time
+            html += `<div style="background: rgba(99, 102, 241, 0.1); padding: 15px; border-radius: 10px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 0.8em; margin-bottom: 5px;">Processing Time</p>
+                <p style="font-size: 1.5em; margin: 0;"><span style="color: #4285f4;">${googleData.time?.toFixed(1) || '?'}s</span> vs <span style="color: #10b981;">${openaiData.time?.toFixed(1) || '?'}s</span></p>
+            </div>`;
+            
+            // Winner indicator
+            const googleScore = googleItems.length + (googleData.time < openaiData.time ? 1 : 0);
+            const openaiScore = openaiItems.length + (openaiData.time < googleData.time ? 1 : 0);
+            let winner = 'Tie';
+            let winnerColor = '#9ca3af';
+            if (googleScore > openaiScore) { winner = '🔵 Google'; winnerColor = '#4285f4'; }
+            if (openaiScore > googleScore) { winner = '🟢 OpenAI'; winnerColor = '#10b981'; }
+            
+            html += `<div style="background: rgba(139, 92, 246, 0.1); padding: 15px; border-radius: 10px; text-align: center;">
+                <p style="color: #9ca3af; font-size: 0.8em; margin-bottom: 5px;">More Data</p>
+                <p style="font-size: 1.2em; margin: 0; color: ${winnerColor};">${winner}</p>
+            </div>`;
+            
+            html += '</div>';
+            
+            return html;
+        }
+        
+        function displayCombinedTranslateResults(data) {
+            // Dark theme matching the Document Translation tab
+            let html = '';
+            
+            if (data.source_language) {
+                html += `<p style="margin-bottom: 15px; color: #e5e7eb;">Source language: <strong style="color: #10b981;">${escapeHtml(data.source_language)}</strong></p>`;
+            }
+            
+            const tableData = data.table_data || (data.extracted_data && data.extracted_data.table_data) || [];
+            
+            if (tableData.length > 0) {
+                // Dark table container
+                html += '<div style="background: #1f2937; border-radius: 12px; overflow: hidden; margin-bottom: 20px;">';
+                html += '<table style="width: 100%; border-collapse: collapse; color: #e5e7eb;">';
+                
+                // Table header with color-coded columns
+                html += '<thead>';
+                html += '<tr style="border-bottom: 2px solid #374151;">';
+                html += '<th style="text-align: left; padding: 16px 20px; font-weight: 600; font-size: 1em; color: #f3f4f6; width: 50%;">Description</th>';
+                html += '<th style="text-align: center; padding: 16px 20px; font-weight: 600; font-size: 1em; color: #60a5fa; width: 25%;">Estimate<br><span style="font-size: 0.7em; font-weight: 400; color: #9ca3af;">(Garage Quote)</span></th>';
+                html += '<th style="text-align: center; padding: 16px 20px; font-weight: 600; font-size: 1em; color: #f87171; width: 25%;">Approved<br><span style="font-size: 0.7em; font-weight: 400; color: #9ca3af;">(Inspector)</span></th>';
+                html += '</tr>';
+                html += '</thead>';
+                
+                // Table body with alternating dark rows
+                html += '<tbody>';
+                tableData.forEach((item, index) => {
+                    const isEven = index % 2 === 0;
+                    const rowBg = isEven ? '' : 'background: rgba(55, 65, 81, 0.5);';
+                    
+                    const approved = item.approved || '-';
+                    let approvedColor = '#6b7280';
+                    if (approved === '✓' || approved === '✔' || approved.toLowerCase() === 'yes') {
+                        approvedColor = '#10b981';
+                    } else if (approved !== '-' && approved !== '') {
+                        approvedColor = '#f87171';
+                    }
+                    
+                    html += `<tr style="border-bottom: 1px solid #374151; ${rowBg}">`;
+                    html += `<td style="padding: 14px 20px; color: #e5e7eb;">${escapeHtml(item.description || '-')}</td>`;
+                    html += `<td style="padding: 14px 20px; text-align: center; color: #60a5fa; font-weight: 500;">${escapeHtml(item.estimate || '-')}</td>`;
+                    html += `<td style="padding: 14px 20px; text-align: center; color: ${approvedColor}; font-weight: 600; font-size: 1.1em;">${escapeHtml(approved)}</td>`;
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
+            }
+            
+            // Summary section with dark cards
+            const totals = data.totals || (data.extracted_data && data.extracted_data.totals);
+            if (totals) {
+                html += '<div style="background: #1f2937; border-radius: 12px; padding: 20px; margin-bottom: 20px;">';
+                html += '<h4 style="color: #f3f4f6; margin-bottom: 15px; font-size: 1.1em;">📊 Summary</h4>';
+                
+                html += '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">';
+                
+                // Estimate Total (Blue card)
+                if (totals.estimate_total || totals.grand_total) {
+                    html += '<div style="background: #1e3a5f; padding: 18px; border-radius: 10px; border-left: 4px solid #3b82f6;">';
+                    html += '<span style="color: #9ca3af; font-size: 0.85em; display: block; margin-bottom: 5px;">Estimate Total (Garage)</span>';
+                    html += `<span style="color: #60a5fa; font-weight: 700; font-size: 1.5em;">${escapeHtml(totals.estimate_total || totals.grand_total)}</span>`;
+                    html += '</div>';
+                }
+                
+                // Approved Total (Teal/Green card)
+                if (totals.approved_total) {
+                    html += '<div style="background: #134e4a; padding: 18px; border-radius: 10px; border-left: 4px solid #10b981;">';
+                    html += '<span style="color: #9ca3af; font-size: 0.85em; display: block; margin-bottom: 5px;">Approved Total (Inspector)</span>';
+                    html += `<span style="color: #10b981; font-weight: 700; font-size: 1.5em;">${escapeHtml(totals.approved_total)}</span>`;
+                    html += '</div>';
+                }
+                
+                html += '</div>';
+                
+                // Difference (Brown/olive card) with percentage delta
+                if (totals.difference) {
+                    // Calculate percentage delta
+                    let deltaPercent = '';
+                    let deltaColor = '#fbbf24';
+                    let deltaIcon = '';
+                    
+                    // Extract numeric values from estimate and approved totals
+                    const estimateStr = totals.estimate_total || totals.grand_total || '';
+                    const approvedStr = totals.approved_total || '';
+                    
+                    // Parse numbers (handle currency formats like "1,234.56" or "1234")
+                    const parseAmount = (str) => {
+                        if (!str) return 0;
+                        const cleaned = str.toString().replace(/[^0-9.-]/g, '');
+                        return parseFloat(cleaned) || 0;
+                    };
+                    
+                    const estimateNum = parseAmount(estimateStr);
+                    const approvedNum = parseAmount(approvedStr);
+                    
+                    if (estimateNum > 0 && approvedNum > 0) {
+                        // Calculate: (approved - estimate) / estimate * 100
+                        // Positive = approved is MORE than estimate
+                        // Negative = approved is LESS than estimate
+                        const percentChange = ((approvedNum - estimateNum) / estimateNum) * 100;
+                        
+                        if (percentChange > 0) {
+                            // Approved MORE than estimate (increase)
+                            deltaPercent = `+${percentChange.toFixed(1)}%`;
+                            deltaColor = '#10b981';  // Green for increase
+                            deltaIcon = '📈';
+                        } else if (percentChange < 0) {
+                            // Approved LESS than estimate (reduction)
+                            deltaPercent = `${percentChange.toFixed(1)}%`;
+                            deltaColor = '#ef4444';  // Red for reduction
+                            deltaIcon = '📉';
+                        } else {
+                            deltaPercent = '0%';
+                            deltaColor = '#9ca3af';
+                            deltaIcon = '➖';
+                        }
+                    }
+                    
+                    html += '<div style="margin-top: 15px; padding: 15px 18px; background: #4a4127; border-radius: 10px; border-left: 4px solid #fbbf24; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">';
+                    html += '<div>';
+                    html += '<span style="color: #9ca3af; font-size: 0.85em;">Difference: </span>';
+                    html += `<span style="color: #fbbf24; font-weight: 700; font-size: 1.2em;">${escapeHtml(totals.difference)}</span>`;
+                    html += '</div>';
+                    
+                    if (deltaPercent) {
+                        html += `<div style="background: rgba(0,0,0,0.3); padding: 8px 15px; border-radius: 20px;">`;
+                        html += `<span style="color: ${deltaColor}; font-weight: 700; font-size: 1.1em;">${deltaIcon} ${deltaPercent}</span>`;
+                        html += `<span style="color: #9ca3af; font-size: 0.75em; margin-left: 5px;">vs estimate</span>`;
+                        html += '</div>';
+                    }
+                    
+                    html += '</div>';
+                }
+                
+                html += '</div>';
+            }
+            
+            if (!tableData.length && data.translated_text) {
+                html += `<div style="padding: 15px; background: #1f2937; border-radius: 10px; color: #e5e7eb; white-space: pre-wrap;">${escapeHtml(data.translated_text)}</div>`;
+            }
+            
+            combinedTranslateContent.innerHTML = html || '<p style="color: #9ca3af; text-align: center;">No data extracted from the document.</p>';
+        }
+        function displayTranslationResults(data) {
+            let html = '';
+
+            // Display provider info if available
+            if (data.provider || data.providerUsed) {
+                html += `<p style="margin-bottom: 10px; color: #9ca3af; font-size: 0.9em;">📡 Processed with: <strong>${escapeHtml(data.provider || data.providerUsed)}</strong></p>`;
+            }
+
+            // Display source language info at the top
+            if (data.source_language) {
+                html += `<p style="margin-bottom: 20px; color: #e5e7eb; font-size: 1.1em;">Source language detected: <strong style="color: #10b981;">${escapeHtml(data.source_language)}</strong></p>`;
+            }
+
+            // Check for new table_data format (preferred)
+            const tableData = data.table_data || (data.extracted_data && data.extracted_data.table_data);
+            
+            if (tableData && Array.isArray(tableData) && tableData.length > 0) {
+                // Display as a proper table with Estimate (blue) and Approved (red) columns
+                html += '<div style="background: #1f2937; border-radius: 12px; overflow: hidden; margin-bottom: 20px;">';
+                html += '<table style="width: 100%; border-collapse: collapse; color: #e5e7eb;">';
+                
+                // Table header with color-coded column hints
+                html += '<thead>';
+                html += '<tr style="border-bottom: 2px solid #374151;">';
+                html += '<th style="text-align: left; padding: 16px 20px; font-weight: 600; font-size: 1em; color: #f3f4f6; width: 50%;">Description</th>';
+                html += '<th style="text-align: center; padding: 16px 20px; font-weight: 600; font-size: 1em; color: #60a5fa; width: 25%;">Estimate<br><span style="font-size: 0.7em; font-weight: 400; color: #9ca3af;">(Garage Quote)</span></th>';
+                html += '<th style="text-align: center; padding: 16px 20px; font-weight: 600; font-size: 1em; color: #f87171; width: 25%;">Approved<br><span style="font-size: 0.7em; font-weight: 400; color: #9ca3af;">(Inspector)</span></th>';
+                html += '</tr>';
+                html += '</thead>';
+                
+                // Table body
+                html += '<tbody>';
+                tableData.forEach((item, index) => {
+                    const isEven = index % 2 === 0;
+                    const rowBg = isEven ? '' : 'background: rgba(55, 65, 81, 0.3);';
+                    
+                    html += `<tr style="border-bottom: 1px solid #374151; ${rowBg}">`;
+                    html += `<td style="padding: 14px 20px; color: #e5e7eb;">${escapeHtml(item.description || item.part_name || '-')}</td>`;
+                    
+                    // Estimate column (blue-tinted)
+                    const estimate = item.estimate || item.estimated_cost || item.part_cost || '-';
+                    html += `<td style="padding: 14px 20px; text-align: center; color: #60a5fa; font-weight: 500;">${escapeHtml(estimate)}</td>`;
+                    
+                    // Approved column (red-tinted for modified, green checkmark for approved as-is)
+                    const approved = item.approved || item.approved_cost || '';
+                    let approvedDisplay = '-';
+                    let approvedColor = '#9ca3af';  // gray for not reviewed
+                    
+                    if (approved === '✓' || approved === '✔' || approved.toLowerCase() === 'yes' || approved.toLowerCase() === 'true' || approved === estimate) {
+                        approvedDisplay = '✓';
+                        approvedColor = '#10b981';  // green for approved as-is
+                    } else if (approved === '-' || approved === '' || approved.toLowerCase() === 'n/a' || approved.toLowerCase() === 'not reviewed') {
+                        approvedDisplay = '-';
+                        approvedColor = '#6b7280';  // gray for not reviewed
+                } else {
+                        approvedDisplay = approved;
+                        approvedColor = '#f87171';  // red for modified value
+                    }
+                    
+                    html += `<td style="padding: 14px 20px; text-align: center; color: ${approvedColor}; font-weight: 600; font-size: 1.1em;">${escapeHtml(approvedDisplay)}</td>`;
+                    html += '</tr>';
+                });
+                html += '</tbody>';
+                html += '</table>';
+                html += '</div>';
+                
+                // Show totals section with both estimate and approved totals
+                const totals = data.totals || (data.extracted_data && data.extracted_data.totals);
+                if (totals) {
+                    html += '<div style="background: #1f2937; border-radius: 12px; padding: 20px; margin-bottom: 20px;">';
+                    html += '<h4 style="color: #f3f4f6; margin-bottom: 15px; font-size: 1.1em;">📊 Summary</h4>';
+                    
+                    html += '<div style="display: grid; grid-template-columns: 1fr 1fr; gap: 15px;">';
+                    
+                    // Estimate Total (Blue)
+                    if (totals.estimate_total || totals.subtotal) {
+                        html += '<div style="background: rgba(59, 130, 246, 0.15); padding: 15px; border-radius: 10px; border-left: 4px solid #3b82f6;">';
+                        html += '<span style="color: #9ca3af; font-size: 0.85em; display: block; margin-bottom: 5px;">Estimate Total (Garage)</span>';
+                        html += `<span style="color: #60a5fa; font-weight: 700; font-size: 1.4em;">${escapeHtml(totals.estimate_total || totals.subtotal)}</span>`;
+                            html += '</div>';
+                        }
+                    
+                    // Approved Total (Red/Green)
+                    if (totals.approved_total || totals.grand_total) {
+                        html += '<div style="background: rgba(16, 185, 129, 0.15); padding: 15px; border-radius: 10px; border-left: 4px solid #10b981;">';
+                        html += '<span style="color: #9ca3af; font-size: 0.85em; display: block; margin-bottom: 5px;">Approved Total (Inspector)</span>';
+                        html += `<span style="color: #10b981; font-weight: 700; font-size: 1.4em;">${escapeHtml(totals.approved_total || totals.grand_total)}</span>`;
+                        html += '</div>';
+                    }
+                    
+                    html += '</div>';
+                    
+                    // Difference (if any) with percentage delta
+                    if (totals.difference) {
+                        // Calculate percentage delta
+                        let deltaPercent = '';
+                        let deltaColor = '#fbbf24';
+                        let deltaIcon = '';
+                        
+                        // Extract numeric values from estimate and approved totals
+                        const estimateStr = totals.estimate_total || totals.subtotal || '';
+                        const approvedStr = totals.approved_total || totals.grand_total || '';
+                        
+                        // Parse numbers (handle currency formats like "1,234.56" or "1234")
+                        const parseAmount = (str) => {
+                            if (!str) return 0;
+                            const cleaned = str.toString().replace(/[^0-9.-]/g, '');
+                            return parseFloat(cleaned) || 0;
+                        };
+                        
+                        const estimateNum = parseAmount(estimateStr);
+                        const approvedNum = parseAmount(approvedStr);
+                        
+                        if (estimateNum > 0 && approvedNum > 0) {
+                            // Calculate: (approved - estimate) / estimate * 100
+                            // Positive = approved is MORE than estimate
+                            // Negative = approved is LESS than estimate
+                            const percentChange = ((approvedNum - estimateNum) / estimateNum) * 100;
+                            
+                            if (percentChange > 0) {
+                                // Approved MORE than estimate (increase)
+                                deltaPercent = `+${percentChange.toFixed(1)}%`;
+                                deltaColor = '#10b981';  // Green for increase
+                                deltaIcon = '📈';
+                            } else if (percentChange < 0) {
+                                // Approved LESS than estimate (reduction)
+                                deltaPercent = `${percentChange.toFixed(1)}%`;
+                                deltaColor = '#ef4444';  // Red for reduction
+                                deltaIcon = '📉';
+                            } else {
+                                deltaPercent = '0%';
+                                deltaColor = '#9ca3af';
+                                deltaIcon = '➖';
+                            }
+                        }
+                        
+                        html += '<div style="margin-top: 15px; padding: 12px 15px; background: rgba(251, 191, 36, 0.15); border-radius: 8px; border-left: 4px solid #fbbf24; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">';
+                        html += '<div>';
+                        html += '<span style="color: #9ca3af; font-size: 0.85em;">Difference: </span>';
+                        html += `<span style="color: #fbbf24; font-weight: 600;">${escapeHtml(totals.difference)}</span>`;
+                        html += '</div>';
+                        
+                        if (deltaPercent) {
+                            html += `<div style="background: rgba(0,0,0,0.2); padding: 6px 12px; border-radius: 15px;">`;
+                            html += `<span style="color: ${deltaColor}; font-weight: 700; font-size: 1em;">${deltaIcon} ${deltaPercent}</span>`;
+                            html += `<span style="color: #9ca3af; font-size: 0.7em; margin-left: 5px;">vs estimate</span>`;
+                            html += '</div>';
+                        }
+                        
+                        html += '</div>';
+                    }
+                    
+                html += '</div>';
+            }
+            } 
+            // Fallback to old extracted_data.items format
+            else if (data.extracted_data && data.extracted_data.items && Array.isArray(data.extracted_data.items)) {
+                html += '<div style="background: #1f2937; border-radius: 12px; overflow: hidden; margin-bottom: 25px;">';
+                html += '<table style="width: 100%; border-collapse: collapse; color: #e5e7eb;">';
+                
+                html += '<thead><tr style="border-bottom: 1px solid #374151;">';
+                html += '<th style="text-align: left; padding: 16px 20px; font-weight: 600; color: #f3f4f6;">Description</th>';
+                html += '<th style="text-align: center; padding: 16px 20px; font-weight: 600; color: #f3f4f6;">Estimate</th>';
+                html += '<th style="text-align: center; padding: 16px 20px; font-weight: 600; color: #f3f4f6;">Approved</th>';
+                html += '</tr></thead>';
+                
+                html += '<tbody>';
+                data.extracted_data.items.forEach((item, index) => {
+                    const rowBg = index % 2 !== 0 ? 'background: rgba(55, 65, 81, 0.3);' : '';
+                    html += `<tr style="border-bottom: 1px solid #374151; ${rowBg}">`;
+                    html += `<td style="padding: 14px 20px;">${escapeHtml(item.part_name || item.description || '-')}</td>`;
+                    html += `<td style="padding: 14px 20px; text-align: center;">${escapeHtml(item.total || item.part_cost || item.estimate || '-')}</td>`;
+                    html += `<td style="padding: 14px 20px; text-align: center; color: #10b981; font-size: 1.2em;">✓</td>`;
+                    html += '</tr>';
+                });
+                html += '</tbody></table></div>';
+                
+                if (data.extracted_data.grand_total) {
+                    html += '<div style="background: #065f46; padding: 15px 20px; border-radius: 10px; display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">';
+                    html += '<span style="color: white; font-weight: 600;">Grand Total</span>';
+                    html += `<span style="color: white; font-weight: 700; font-size: 1.3em;">${escapeHtml(data.extracted_data.grand_total)}</span>`;
+                    html += '</div>';
+                }
+            }
+
+            // Display document info if available
+            const docInfo = data.document_info || (data.extracted_data && data.extracted_data.document_info);
+            if (docInfo) {
+                html += '<div style="background: #f0fdf4; border-radius: 10px; padding: 15px 20px; margin-bottom: 20px; border: 1px solid #a7f3d0;">';
+                html += '<h4 style="color: #065f46; margin-bottom: 10px; font-size: 1em;">📋 Document Information</h4>';
+                html += '<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">';
+                if (docInfo.company_name) html += `<div><span style="color: #6b7280; font-size: 0.85em;">Company:</span><br><strong style="color: #065f46;">${escapeHtml(docInfo.company_name)}</strong></div>`;
+                if (docInfo.date) html += `<div><span style="color: #6b7280; font-size: 0.85em;">Date:</span><br><strong style="color: #065f46;">${escapeHtml(docInfo.date)}</strong></div>`;
+                if (docInfo.reference_number) html += `<div><span style="color: #6b7280; font-size: 0.85em;">Reference:</span><br><strong style="color: #065f46;">${escapeHtml(docInfo.reference_number)}</strong></div>`;
+                if (docInfo.phone) html += `<div><span style="color: #6b7280; font-size: 0.85em;">Phone:</span><br><strong style="color: #065f46;">${escapeHtml(docInfo.phone)}</strong></div>`;
+                html += '</div></div>';
+            }
+
+            // Display translated text if available (collapsible)
+            if (data.translated_text) {
+                html += '<div style="margin-top: 20px;">';
+                html += '<h3 style="color: #065f46; margin-bottom: 15px; font-size: 1.1em; cursor: pointer;" onclick="toggleTranslatedText()">📄 Full Translated Text (Click to expand)</h3>';
+                html += `<div class="raw-translation" id="translatedTextContent" style="display: none;">${escapeHtml(data.translated_text)}</div>`;
+                html += '</div>';
+            }
+
+            // If no data at all
+            if (!data.extracted_data && !data.translated_text && !tableData) {
+                html += '<div style="text-align: center; padding: 30px; color: #6b7280;">';
+                html += '<p style="font-size: 1.1em;">No data could be extracted from the document.</p>';
+                html += '<p style="font-size: 0.9em; margin-top: 10px;">Please ensure the document contains readable text.</p>';
+                html += '</div>';
+            }
+
+            // Show mock data notice if applicable
+            if (data.note) {
+                html += `<div style="margin-top: 20px; padding: 15px; background: #fef3c7; border-left: 4px solid #f59e0b; border-radius: 8px; color: #92400e; font-size: 0.9em;">
+                    ${escapeHtml(data.note)}
+                </div>`;
+            }
+
+            // Show raw API response for debugging (can be removed in production)
+            if (data.raw_response) {
+                html += '<div style="margin-top: 20px;">';
+                html += '<h3 style="color: #6b7280; margin-bottom: 10px; font-size: 1em; cursor: pointer;" onclick="toggleRawApiResponse()">🔧 Raw API Response (Debug - Click to expand)</h3>';
+                html += `<pre id="rawApiResponse" style="display: none; background: #f3f4f6; padding: 15px; border-radius: 8px; font-size: 0.8em; overflow-x: auto; white-space: pre-wrap; color: #374151;">${escapeHtml(JSON.stringify(data.raw_response, null, 2))}</pre>`;
+                html += '</div>';
+            }
+
+            translationContent.innerHTML = html;
+            translationResults.classList.add('show');
+        }
+
+        function toggleRawApiResponse() {
+            const el = document.getElementById('rawApiResponse');
+            if (el) {
+                el.style.display = el.style.display === 'none' ? 'block' : 'none';
+            }
+        }
+
+        function toggleTranslatedText() {
+            const content = document.getElementById('translatedTextContent');
+            if (content) {
+                content.style.display = content.style.display === 'none' ? 'block' : 'none';
+            }
+        }
+
+        function showTranslationError(message) {
+            translationContent.innerHTML = `
+                <div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px; border-left: 5px solid #dc2626;">
+                    <strong>⚠️ Error:</strong> ${escapeHtml(message)}
+                </div>
+            `;
+            translationResults.classList.add('show');
+        }
 
         // Drag and drop
         uploadSection.addEventListener('dragover', function(e) {
@@ -1181,6 +3374,120 @@ HTML_TEMPLATE = '''
             }
         }
     </script>
+    
+    <!-- Image Preview Modal -->
+    <div id="imagePreviewModal" class="image-modal" onclick="closeImageModal(event)">
+        <span class="modal-close" onclick="closeImageModal(event)">&times;</span>
+        <div class="modal-content" onclick="event.stopPropagation()">
+            <div class="modal-image-container" id="modalImageContainer">
+                <img id="modalImage" class="modal-image" src="" alt="Preview" onclick="toggleZoom()">
+            </div>
+            <div class="modal-controls">
+                <button class="modal-btn" onclick="zoomIn()">🔍+ Zoom In</button>
+                <button class="modal-btn" onclick="zoomOut()">🔍- Zoom Out</button>
+                <button class="modal-btn" onclick="resetZoom()">↺ Reset</button>
+            </div>
+            <p class="modal-filename" id="modalFilename"></p>
+            <p class="zoom-indicator" id="zoomIndicator">100%</p>
+        </div>
+    </div>
+    
+    <script>
+        // Image Modal Functions
+        let currentZoom = 1;
+        const zoomStep = 0.25;
+        const maxZoom = 4;
+        const minZoom = 0.5;
+        
+        function openImageModal(imgSrc, filename) {
+            const modal = document.getElementById('imagePreviewModal');
+            const modalImg = document.getElementById('modalImage');
+            const modalFilename = document.getElementById('modalFilename');
+            
+            modalImg.src = imgSrc;
+            modalFilename.textContent = filename || 'Uploaded Image';
+            modal.style.display = 'block';
+            document.body.style.overflow = 'hidden';
+            
+            resetZoom();
+        }
+        
+        function closeImageModal(event) {
+            if (event) {
+                // Only close if clicking on the modal background or close button
+                if (event.target.id === 'imagePreviewModal' || event.target.classList.contains('modal-close')) {
+                    const modal = document.getElementById('imagePreviewModal');
+                    modal.style.display = 'none';
+                    document.body.style.overflow = 'auto';
+                    resetZoom();
+                }
+            }
+        }
+        
+        function toggleZoom() {
+            if (currentZoom === 1) {
+                currentZoom = 2;
+            } else {
+                currentZoom = 1;
+            }
+            applyZoom();
+        }
+        
+        function zoomIn() {
+            if (currentZoom < maxZoom) {
+                currentZoom = Math.min(currentZoom + zoomStep, maxZoom);
+                applyZoom();
+            }
+        }
+        
+        function zoomOut() {
+            if (currentZoom > minZoom) {
+                currentZoom = Math.max(currentZoom - zoomStep, minZoom);
+                applyZoom();
+            }
+        }
+        
+        function resetZoom() {
+            currentZoom = 1;
+            applyZoom();
+        }
+        
+        function applyZoom() {
+            const modalImg = document.getElementById('modalImage');
+            const zoomIndicator = document.getElementById('zoomIndicator');
+            
+            modalImg.style.transform = `scale(${currentZoom})`;
+            zoomIndicator.textContent = `${Math.round(currentZoom * 100)}%`;
+            
+            if (currentZoom > 1) {
+                modalImg.classList.add('zoomed');
+            } else {
+                modalImg.classList.remove('zoomed');
+            }
+        }
+        
+        // Close modal on Escape key
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') {
+                const modal = document.getElementById('imagePreviewModal');
+                if (modal.style.display === 'block') {
+                    modal.style.display = 'none';
+                    document.body.style.overflow = 'auto';
+                    resetZoom();
+                }
+            }
+        });
+        
+        // Mouse wheel zoom
+        document.getElementById('modalImageContainer').addEventListener('wheel', function(e) {
+            e.preventDefault();
+            if (e.deltaY < 0) {
+                zoomIn();
+            } else {
+                zoomOut();
+            }
+        });
+    </script>
 </body>
 </html>
 '''
@@ -1544,6 +3851,1378 @@ def vehicle_models():
     except Exception as e:
         return jsonify({'error': str(e)}), 500
 
+
+# Configuration for translation API
+# Choose OCR provider: 'openai' (GPT-4 Vision) or 'google' (Google Cloud Vision + Translate)
+# Set via environment variable or defaults to 'openai'
+OCR_PROVIDER = os.environ.get('OCR_PROVIDER', 'openai').lower()
+
+# Google Cloud credentials (only needed if using Google Cloud Vision)
+# Set GOOGLE_APPLICATION_CREDENTIALS environment variable to your service account JSON file path
+GOOGLE_CLOUD_PROJECT = os.environ.get('GOOGLE_CLOUD_PROJECT', '')
+
+# Allowed document extensions
+ALLOWED_DOC_EXTENSIONS = {'pdf', 'doc', 'docx', 'txt', 'png', 'jpg', 'jpeg', 'tiff', 'tif'}
+
+
+def process_with_google_vision(image_path_or_bytes, is_bytes=False, document_type="estimation"):
+    """
+    Process an image using Google Cloud Vision API for OCR, then GPT for translation/extraction.
+    Returns structured data similar to the OpenAI format.
+    
+    Args:
+        image_path_or_bytes: Path to image file or image bytes
+        is_bytes: If True, image_path_or_bytes contains bytes data
+        document_type: "estimation" for translation docs, "vehicle_info" for vehicle documents
+    """
+    # Use the helper module if available (preferred approach)
+    if GOOGLE_VISION_HELPER_AVAILABLE:
+        if is_bytes:
+            # Save bytes to temporary file
+            import tempfile
+            with tempfile.NamedTemporaryFile(delete=False, suffix='.png') as tmp_file:
+                tmp_file.write(image_path_or_bytes)
+                tmp_path = tmp_file.name
+            try:
+                return google_vision_process(tmp_path, document_type)
+            finally:
+                try:
+                    os.unlink(tmp_path)
+                except:
+                    pass
+        else:
+            return google_vision_process(image_path_or_bytes, document_type)
+    
+    # Fallback: Old implementation (for backwards compatibility)
+    try:
+        from google.cloud import vision
+        
+        # Initialize client
+        vision_client = vision.ImageAnnotatorClient()
+        
+        # Read image
+        if is_bytes:
+            image_content = image_path_or_bytes
+        else:
+            with open(image_path_or_bytes, 'rb') as f:
+                image_content = f.read()
+        
+        # Perform OCR using Google Cloud Vision
+        image = vision.Image(content=image_content)
+        response = vision_client.text_detection(image=image)
+        
+        if response.error.message:
+            raise Exception(f"Google Vision API error: {response.error.message}")
+        
+        # Extract text from response
+        texts = response.text_annotations
+        original_text = texts[0].description if texts else ""
+        
+        if not original_text.strip():
+            return {
+                'translated_text': 'No text detected in the image.',
+                'table_data': [],
+                'source_language': 'Unknown',
+                'document_info': {},
+                'totals': {}
+            }
+        
+        # Use GPT for translation and extraction (recommended approach)
+        # This is the fallback - prefer using google_ocr_helper.py
+        from openai import OpenAI
+        api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+        if not api_key:
+            raise Exception("OPENAI_API_KEY not set. Cannot translate/extract without API key.")
+        
+        client = OpenAI(api_key=api_key)
+        
+        # Use GPT to translate and extract structured data
+        prompt = """Translate this text to English and extract structured estimation data as JSON. 
+Return format: {"translated_text": "...", "table_data": [...], "source_language": "...", "totals": {...}}"""
+        
+        response = client.chat.completions.create(
+            model="gpt-4o-2024-11-20",
+            messages=[
+                {"role": "user", "content": prompt + "\n\n" + original_text}
+            ],
+            max_tokens=3000,
+            temperature=0.1
+        )
+        
+        result_text = response.choices[0].message.content.strip()
+        
+        # Try to parse JSON
+        import json
+        try:
+            if "```json" in result_text:
+                result_text = result_text.split("```json")[1].split("```")[0].strip()
+            elif "```" in result_text:
+                result_text = result_text.split("```")[1].split("```")[0].strip()
+            
+            result = json.loads(result_text)
+            translated_text = result.get('translated_text', original_text)
+            source_language_name = result.get('source_language', 'Unknown')
+        except:
+            translated_text = original_text
+            source_language_name = 'Unknown'
+        
+        # Parse the translated text to extract table data
+        # This is a simple extraction - for complex documents, GPT-4 may be better
+        table_data = []
+        lines = translated_text.split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            
+            # Try to extract cost information from each line
+            # Look for patterns like "item name ... 1250/-" or "item: 1250"
+            import re
+            
+            # Match lines with prices (numbers followed by /- or just numbers at the end)
+            price_pattern = r'(.+?)\s*[:\-]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)\s*(?:/\-|Rs\.?|INR)?$'
+            match = re.search(price_pattern, line)
+            
+            if match:
+                description = match.group(1).strip()
+                estimate = match.group(2).strip() + '/-'
+                
+                # Skip if description is too short or just numbers
+                if len(description) > 2 and not description.replace(',', '').replace('.', '').isdigit():
+                    table_data.append({
+                        'description': description,
+                        'estimate': estimate,
+                        'approved': '✓'
+                    })
+        
+        # Extract document info (company name, date, etc.)
+        document_info = {}
+        
+        # Try to find company name (usually at the top, in caps or bold)
+        first_lines = lines[:5]
+        for line in first_lines:
+            line = line.strip()
+            if len(line) > 5 and not any(char.isdigit() for char in line[:5]):
+                document_info['company_name'] = line
+                break
+        
+        # Try to find date
+        date_pattern = r'\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}'
+        for line in lines:
+            date_match = re.search(date_pattern, line)
+            if date_match:
+                document_info['date'] = date_match.group()
+                break
+        
+        # Try to find phone numbers
+        phone_pattern = r'(?:\+\d{1,3}\s?)?\d{3,4}[\s\-]?\d{3,4}[\s\-]?\d{3,4}'
+        for line in lines:
+            phone_match = re.search(phone_pattern, line)
+            if phone_match:
+                document_info['phone'] = phone_match.group()
+                break
+        
+        # Calculate grand total if possible
+        totals = {}
+        total_pattern = r'(?:total|grand\s*total|sum)\s*[:\-]?\s*(\d{1,3}(?:,\d{3})*(?:\.\d{2})?)'
+        for line in lines:
+            total_match = re.search(total_pattern, line.lower())
+            if total_match:
+                totals['grand_total'] = total_match.group(1) + '/-'
+                break
+        
+        return {
+            'translated_text': translated_text,
+            'table_data': table_data,
+            'source_language': source_language_name,
+            'document_info': document_info,
+            'totals': totals,
+            'original_text': original_text
+        }
+        
+    except ImportError:
+        raise Exception("Google Cloud libraries not installed. Run: pip install google-cloud-vision google-cloud-translate")
+    except Exception as e:
+        raise Exception(f"Google Cloud Vision error: {str(e)}")
+
+def allowed_doc_file(filename):
+    """Check if document file extension is allowed."""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_DOC_EXTENSIONS
+
+
+@app.route('/api/translate-document', methods=['POST'])
+def translate_document():
+    """
+    API endpoint to receive a document, forward it to the external translation API,
+    and return the translated/extracted information.
+    
+    The external API is expected to:
+    1. Accept a document file (PDF, Word, Image, etc.)
+    2. Translate from Singla to English
+    3. Extract key estimation data
+    4. Return structured JSON with translated text and extracted data
+    """
+    try:
+        if 'document' not in request.files:
+            return jsonify({'error': 'No document provided'}), 400
+        
+        file = request.files['document']
+        
+        if file.filename == '':
+            return jsonify({'error': 'No document selected'}), 400
+        
+        if not allowed_doc_file(file.filename):
+            return jsonify({'error': 'Document type not allowed. Supported: PDF, Word, Text, or Image files'}), 400
+        
+        # Save uploaded document temporarily
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"doc_{timestamp}_{file.filename}"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(filepath)
+        
+        # Check if we should use mock data (set to 'true' for testing without API)
+        USE_MOCK_DATA = os.environ.get('USE_MOCK_TRANSLATION', 'false').lower() == 'true'
+        
+        if USE_MOCK_DATA:
+            # Return mock data for UI testing until actual API is integrated
+            mock_response = {
+                'success': True,
+                'translated_text': f'''ESTIMATION DOCUMENT - Translated from Singla
+
+Document: {file.filename}
+Date: {datetime.now().strftime("%Y-%m-%d")}
+
+--- Repair Estimation Details ---
+
+Part 1: Front Bumper Assembly
+- Labor Cost: ₹2,500
+- Part Cost: ₹8,500
+- Total: ₹11,000
+
+Part 2: Headlight Unit (Left)
+- Labor Cost: ₹1,200
+- Part Cost: ₹6,800
+- Total: ₹8,000
+
+Part 3: Paint Work (Front Section)
+- Labor Cost: ₹3,500
+- Material Cost: ₹2,200
+- Total: ₹5,700
+
+---
+Grand Total Estimation: ₹24,700
+Validity: 30 days from date of issue
+''',
+                'extracted_data': {
+                    'items': [
+                        {
+                            'part_name': 'Front Bumper Assembly',
+                            'labor_cost': '₹2,500',
+                            'part_cost': '₹8,500',
+                            'total': '₹11,000'
+                        },
+                        {
+                            'part_name': 'Headlight Unit (Left)',
+                            'labor_cost': '₹1,200',
+                            'part_cost': '₹6,800',
+                            'total': '₹8,000'
+                        },
+                        {
+                            'part_name': 'Paint Work (Front Section)',
+                            'labor_cost': '₹3,500',
+                            'material_cost': '₹2,200',
+                            'total': '₹5,700'
+                        }
+                    ],
+                    'grand_total': '₹24,700',
+                    'validity': '30 days',
+                    'document_date': datetime.now().strftime("%Y-%m-%d")
+                },
+                'source_language': 'Singla',
+                'confidence': 0.92,
+                'note': '⚠️ This is MOCK DATA for testing. Set USE_MOCK_TRANSLATION=false when actual API is ready.'
+            }
+            
+            # Clean up the uploaded file
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except:
+                pass
+            
+            return jsonify(mock_response)
+        
+        # Check file type
+        file_ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+        is_image = file_ext in {'png', 'jpg', 'jpeg', 'tiff', 'tif'}
+        is_pdf = file_ext == 'pdf'
+        
+        # Document Translation ALWAYS uses Google Vision OCR (when available)
+        # This is separate from Vehicle Info Extraction which uses GPT-4
+        use_google = GOOGLE_VISION_HELPER_AVAILABLE
+        print(f"DEBUG: Document Translation - Using {'Google Vision OCR' if use_google else 'OpenAI GPT-4'}")
+        
+        # === GOOGLE CLOUD VISION API (Primary for Translation) ===
+        if use_google:
+            try:
+                if is_image:
+                    result = process_with_google_vision(filepath, is_bytes=False, document_type="estimation")
+                    return jsonify({
+                        'success': True,
+                        'translated_text': result.get('translated_text', ''),
+                        'table_data': result.get('table_data', []),
+                        'source_language': result.get('source_language', 'Unknown'),
+                        'document_info': result.get('document_info', {}),
+                        'totals': result.get('totals', {}),
+                        'provider': 'Google Cloud Vision API + GPT',
+                        'confidence': 0.9
+                    })
+                elif is_pdf:
+                    # Handle PDF with Google Cloud
+                    try:
+                        import fitz
+                        all_results = []
+                        doc = fitz.open(filepath)
+                        for page in doc:
+                            mat = fitz.Matrix(2, 2)
+                            pix = page.get_pixmap(matrix=mat)
+                            image_bytes = pix.tobytes("png")
+                            page_result = process_with_google_vision(image_bytes, is_bytes=True, document_type="estimation")
+                            all_results.append(page_result)
+                        doc.close()
+                        
+                        # Combine results
+                        combined_text = '\n\n'.join([r.get('translated_text', '') for r in all_results])
+                        combined_table = []
+                        for r in all_results:
+                            combined_table.extend(r.get('table_data', []))
+                        
+                        return jsonify({
+                            'success': True,
+                            'translated_text': combined_text,
+                            'table_data': combined_table,
+                            'source_language': all_results[0].get('source_language', 'Unknown') if all_results else 'Unknown',
+                            'document_info': all_results[0].get('document_info', {}) if all_results else {},
+                            'totals': all_results[-1].get('totals', {}) if all_results else {},
+                            'provider': 'Google Cloud Vision',
+                            'pages_processed': len(all_results),
+                            'confidence': 0.9
+                        })
+                    except ImportError:
+                        return jsonify({'error': 'PDF support requires PyMuPDF. Run: pip install PyMuPDF'}), 400
+                else:
+                    return jsonify({'error': f'Unsupported file type: {file_ext}'}), 400
+                    
+            except Exception as google_error:
+                error_msg = str(google_error)
+                print(f"DEBUG: Google Cloud error: {error_msg}")
+                
+                # Check if it's a billing/API disabled error - fall back to OpenAI
+                if any(err in error_msg.lower() for err in ['billing', 'disabled', 'not been used', 'enable']):
+                    print("DEBUG: Google Vision API issue - falling back to OpenAI GPT-4")
+                    # Fall through to OpenAI below
+                    pass
+                else:
+                    return jsonify({'error': f'Google Cloud Vision error: {error_msg}'}), 500
+        
+        # === OPENAI GPT-4 VISION API (fallback or default) ===
+        try:
+            from openai import OpenAI
+            
+            # Initialize OpenAI client
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                return jsonify({'error': 'OpenAI API key not configured. Please set OPENAI_API_KEY environment variable.'}), 500
+            
+            client = OpenAI(api_key=api_key.strip())
+            
+            # System prompt for translation
+            system_prompt = """You are an EXPERT document analyst specializing in vehicle repair estimation documents from Sri Lanka.
+
+DOCUMENT STRUCTURE - THIS IS A TABULAR DOCUMENT:
+================================================
+This document has a specific structure:
+- LEFT COLUMN: Item/part description (printed text, numbered rows)
+- PRICE COLUMN: Contains BOTH estimate AND approved prices
+  * ESTIMATE = BLACK ink numbers (original garage quote) - these may be SCRATCHED/CROSSED OUT
+  * APPROVED = RED ink numbers (inspector's corrected/approved amount)
+- The document has SECTIONS: Labour, Repair & Straight, Booth Painting, Material/Spare Parts
+
+IMPORTANT COLOR DISTINCTION:
+- BLACK handwritten numbers = ESTIMATE (original quote from garage)
+- RED handwritten numbers = APPROVED (inspector's final approved amount)
+- When BLACK is crossed out and RED is written next to it, use BLACK for estimate and RED for approved
+
+STEP-BY-STEP EXTRACTION PROCESS:
+================================
+1. First, identify the company name and header information
+2. Then, go ROW BY ROW through the document
+3. For EACH row: read the description, then look to its RIGHT for the estimate amount, then look further RIGHT for the approved amount
+4. Extract EVERY numbered row - don't skip any
+
+CRITICAL RULES FOR READING HANDWRITTEN NUMBERS:
+===============================================
+- LOOK AT EACH DIGIT INDIVIDUALLY before writing the number
+- Common Sri Lankan repair amounts: 500, 800, 1000, 1200, 1500, 1800, 2000, 2500, 3000, 4000, 4200, 5000, 8000, 8500, 10000, 12000, 18500
+- The "/-" or "/=" suffix marks the end of an amount
+- BLACK handwritten numbers = ESTIMATE (original garage quote) - may be crossed out/scratched
+- RED handwritten numbers = APPROVED (inspector's corrected amount)
+- When you see a BLACK number crossed out with a RED number next to it:
+  * Put the BLACK number in "estimate"
+  * Put the RED number in "approved"
+- Negative numbers (with minus sign) = deductions or rejected items
+
+READING HANDWRITTEN DIGITS:
+- "1" looks like a vertical line |
+- "2" has a curved top and flat bottom
+- "3" looks like two bumps on the right
+- "4" has a triangle or flag shape
+- "5" has a flat top and curved bottom
+- "6" has a loop at bottom
+- "7" has a horizontal line at top
+- "8" looks like two circles stacked
+- "9" has a loop at top
+- "0" is a circle or oval
+
+FOR EACH NUMBER: Count the digits! If you see |800, that's 1-8-0-0 = 1800, not 800.
+
+SPECIAL CASES:
+- If estimate is blank/empty, use "-"
+- If approved shows a checkmark (✓), use "✓" (means approved as-is)
+- If approved is crossed out or says "deleted"/"jacked", note that
+- "SH" or "S/H" means "Same as Holder" or spare parts reference
+
+Return your response in this EXACT JSON format:
+{
+    "translated_text": "Company header and document notes",
+    "document_info": {
+        "company_name": "Workshop name",
+        "address": "Address",
+        "date": "Document date",
+        "reference_number": "Est NO or reference",
+        "vehicle_info": "Chassis, color, year if visible"
+    },
+    "table_data": [
+        {"description": "Item name", "estimate": "EXACT blue number or '-'", "approved": "EXACT red number or '✓' or '-'"}
+    ],
+    "totals": {
+        "estimate_total": "Sum of estimates",
+        "approved_total": "Sum of approved amounts (use estimate if ✓)",
+        "grand_total": "Grand total from document",
+        "difference": "Difference"
+    },
+    "source_language": "English"
+}
+
+CRITICAL - DO NOT SUMMARIZE:
+============================
+- Extract EACH LINE ITEM INDIVIDUALLY - do NOT combine items into categories
+- If the document has 15 rows, your output must have 15 items in table_data
+- Keep the original Sinhala/Tamil description and add English translation in parentheses
+- Example: "බම්පරය (Bumper)" or just the translated name
+
+FOR SINHALA DOCUMENTS:
+- Translate each item name to English
+- Common parts: බම්පරය=Bumper, ෆෙන්ඩරය=Fender, හෙඩ් ලයිට්=Headlight, බොනට්=Bonnet, දොර=Door, පේන්ට්=Paint, පොලිෂ්=Polish
+
+LOOK FOR THE GRAND TOTAL:
+- The document usually has a grand total at the bottom (e.g., 73049/-)
+- This should match the sum of all approved amounts
+
+FINAL VERIFICATION:
+1. Count the rows in the original image
+2. Your table_data should have the SAME number of items
+3. The grand total should match what's written on the document
+
+NEVER SUMMARIZE INTO GENERIC CATEGORIES. Extract each line item separately."""
+            
+            def process_image_with_gpt(image_data, mime_type, page_info=""):
+                """Process a single image with GPT-4 Vision"""
+                user_text = "Please translate this estimation document and extract the repair cost data:"
+                if page_info:
+                    user_text = f"Please translate this estimation document (Page {page_info}) and extract the repair cost data:"
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o-2024-11-20",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": user_text},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": f"data:{mime_type};base64,{image_data}"}
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=4096
+                )
+                return response.choices[0].message.content
+            
+            def parse_gpt_response(result_text):
+                """Parse GPT response, handling JSON extraction"""
+                clean_text = result_text.strip()
+                if clean_text.startswith('```json'):
+                    clean_text = clean_text[7:]
+                if clean_text.startswith('```'):
+                    clean_text = clean_text[3:]
+                if clean_text.endswith('```'):
+                    clean_text = clean_text[:-3]
+                return json.loads(clean_text.strip())
+            
+            if is_pdf:
+                # Handle PDF files
+                try:
+                    import fitz  # PyMuPDF
+                    PDF_SUPPORT = True
+                except ImportError:
+                    try:
+                        from pdf2image import convert_from_path
+                        PDF_SUPPORT = 'pdf2image'
+                    except ImportError:
+                        PDF_SUPPORT = False
+                
+                if not PDF_SUPPORT:
+                    return jsonify({
+                        'error': 'PDF support requires PyMuPDF or pdf2image library. Please install: pip install PyMuPDF',
+                        'hint': 'Alternatively, you can convert your PDF to images (PNG/JPG) and upload those.'
+                    }), 400
+                
+                # Convert PDF to images and process
+                all_translated_text = []
+                all_items = []
+                source_language = 'Unknown'
+                grand_total = None
+                document_date = None
+                validity = None
+                reference_number = None
+                
+                if PDF_SUPPORT == 'pdf2image':
+                    # Use pdf2image
+                    images = convert_from_path(filepath)
+                    for i, image in enumerate(images):
+                        # Convert PIL image to base64
+                        import io
+                        img_buffer = io.BytesIO()
+                        image.save(img_buffer, format='PNG')
+                        img_buffer.seek(0)
+                        image_data = base64.b64encode(img_buffer.read()).decode('utf-8')
+                        
+                        result_text = process_image_with_gpt(image_data, 'image/png', f"{i+1}/{len(images)}")
+                        
+                        try:
+                            result = parse_gpt_response(result_text)
+                            if result.get('translated_text'):
+                                all_translated_text.append(f"--- Page {i+1} ---\n{result['translated_text']}")
+                            if result.get('extracted_data', {}).get('items'):
+                                all_items.extend(result['extracted_data']['items'])
+                            if result.get('source_language') and source_language == 'Unknown':
+                                source_language = result['source_language']
+                            if result.get('extracted_data', {}).get('grand_total'):
+                                grand_total = result['extracted_data']['grand_total']
+                            if result.get('extracted_data', {}).get('document_date'):
+                                document_date = result['extracted_data']['document_date']
+                            if result.get('extracted_data', {}).get('validity'):
+                                validity = result['extracted_data']['validity']
+                            if result.get('extracted_data', {}).get('reference_number'):
+                                reference_number = result['extracted_data']['reference_number']
+                        except json.JSONDecodeError:
+                            all_translated_text.append(f"--- Page {i+1} ---\n{result_text}")
+                else:
+                    # Use PyMuPDF
+                    doc = fitz.open(filepath)
+                    for i, page in enumerate(doc):
+                        # Render page to image
+                        mat = fitz.Matrix(2, 2)  # 2x zoom for better quality
+                        pix = page.get_pixmap(matrix=mat)
+                        image_data = base64.b64encode(pix.tobytes("png")).decode('utf-8')
+                        
+                        result_text = process_image_with_gpt(image_data, 'image/png', f"{i+1}/{len(doc)}")
+                        
+                        try:
+                            result = parse_gpt_response(result_text)
+                            if result.get('translated_text'):
+                                all_translated_text.append(f"--- Page {i+1} ---\n{result['translated_text']}")
+                            if result.get('extracted_data', {}).get('items'):
+                                all_items.extend(result['extracted_data']['items'])
+                            if result.get('source_language') and source_language == 'Unknown':
+                                source_language = result['source_language']
+                            if result.get('extracted_data', {}).get('grand_total'):
+                                grand_total = result['extracted_data']['grand_total']
+                            if result.get('extracted_data', {}).get('document_date'):
+                                document_date = result['extracted_data']['document_date']
+                            if result.get('extracted_data', {}).get('validity'):
+                                validity = result['extracted_data']['validity']
+                            if result.get('extracted_data', {}).get('reference_number'):
+                                reference_number = result['extracted_data']['reference_number']
+                        except json.JSONDecodeError:
+                            all_translated_text.append(f"--- Page {i+1} ---\n{result_text}")
+                    doc.close()
+                
+                # Combine results from all pages
+                combined_extracted_data = {'items': all_items}
+                if grand_total:
+                    combined_extracted_data['grand_total'] = grand_total
+                if document_date:
+                    combined_extracted_data['document_date'] = document_date
+                if validity:
+                    combined_extracted_data['validity'] = validity
+                if reference_number:
+                    combined_extracted_data['reference_number'] = reference_number
+                
+                    return jsonify({
+                        'success': True,
+                    'translated_text': '\n\n'.join(all_translated_text),
+                    'extracted_data': combined_extracted_data,
+                    'source_language': source_language,
+                    'confidence': 0.9,
+                    'pages_processed': len(all_translated_text)
+                })
+                
+            elif is_image:
+                # Handle image files directly
+                with open(filepath, 'rb') as f:
+                    image_data = base64.b64encode(f.read()).decode('utf-8')
+                
+                mime_type = f"image/{file_ext}" if file_ext != 'jpg' else 'image/jpeg'
+                
+                result_text = process_image_with_gpt(image_data, mime_type)
+                
+                try:
+                    result = parse_gpt_response(result_text)
+                    
+                    # Build response with new table_data format
+                    response_data = {
+                        'success': True,
+                        'translated_text': result.get('translated_text', ''),
+                        'source_language': result.get('source_language', 'Unknown'),
+                        'confidence': 0.9
+                    }
+                    
+                    # Include table_data if available (new format)
+                    if result.get('table_data'):
+                        response_data['table_data'] = result['table_data']
+                    
+                    # Include document_info if available
+                    if result.get('document_info'):
+                        response_data['document_info'] = result['document_info']
+                    
+                    # Include totals if available
+                    if result.get('totals'):
+                        response_data['totals'] = result['totals']
+                    
+                    # Fallback: include extracted_data for backwards compatibility
+                    if result.get('extracted_data'):
+                        response_data['extracted_data'] = result['extracted_data']
+                    
+                    return jsonify(response_data)
+                except json.JSONDecodeError:
+                    return jsonify({
+                        'success': True,
+                        'translated_text': result_text,
+                        'extracted_data': {},
+                        'source_language': 'Unknown',
+                        'note': 'Could not parse structured data, showing raw translation'
+                    })
+            else:
+                # For unsupported file types
+                return jsonify({
+                    'error': f'File type not supported: {file_ext.upper()}. Supported formats: PDF, PNG, JPG, JPEG, TIFF',
+                    'hint': 'Please upload a PDF or image file of the document.'
+                }), 400
+                
+        except Exception as api_error:
+            print(f"DEBUG: Translation error: {str(api_error)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'Error processing document: {str(api_error)}'}), 500
+        finally:
+            # Clean up temporary file
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except:
+                pass
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/extract-vehicle-info', methods=['POST'])
+def extract_vehicle_info():
+    """
+    Extract vehicle information from a document (registration, insurance papers, etc.)
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Save file
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        original_filename = file.filename
+        file_ext = original_filename.rsplit('.', 1)[-1].lower() if '.' in original_filename else ''
+        
+        if file_ext not in ['pdf', 'png', 'jpg', 'jpeg', 'tiff', 'tif']:
+            return jsonify({'error': 'Unsupported file type'}), 400
+        
+        filepath = os.path.join(UPLOAD_FOLDER, f"vehicle_doc_{timestamp}.{file_ext}")
+        file.save(filepath)
+        
+        # Vehicle Details Extraction ALWAYS uses OpenAI GPT-4 Vision
+        # (Google Vision OCR is only used for Document Translation)
+        print("DEBUG: Vehicle Info Extraction - Using OpenAI GPT-4 Vision (always)")
+        
+        # Use OpenAI GPT-4 Vision directly for vehicle info extraction
+        try:
+            from openai import OpenAI
+            # Strip any whitespace/newlines from API key to prevent header errors
+            api_key = os.environ.get('OPENAI_API_KEY', '').strip()
+            client = OpenAI(api_key=api_key) if api_key else OpenAI()
+            
+            vehicle_prompt = """You are a document analysis expert specializing in insurance and vehicle accident reports.
+IMPORTANT: You MUST analyze this document thoroughly and extract ALL visible information. Return the COMPLETE JSON structure below with ALL sections filled in.
+
+This could be an accident intimation form, insurance claim document, vehicle registration, repair estimate, or any vehicle-related document. Look for ANY text visible in the image and extract relevant information.
+
+Extract the following categories of information:
+
+**Document & Reference Information:**
+- Reference Number / Claim Number
+- Policy Number
+- Document Type (Intimation, Claim, Estimate, etc.)
+
+**Accident/Incident Details:**
+- Date and Time of Accident
+- Location of Accident (full address)
+- Police Division / Station
+- Area Code / Contact Number
+- Description of Accident (what happened)
+
+**Vehicle Information:**
+- Vehicle Number / Registration
+- Vehicle Type & Color
+- Make (manufacturer)
+- Model
+- Year
+- VIN / Chassis Number
+- Engine Number
+
+**Driver Information:**
+- Driver Name
+- Driver Age
+- NIC/ID Number
+- Driver License Number
+- License Expiry Date
+- License Class
+
+**Damage Information:**
+- Damaged Items/Parts on Vehicle (list all)
+- Damages to Goods in Vehicle
+- Personal Injuries
+- Third Party Damages
+- Third Party Vehicle Numbers
+- Property Damage
+
+**Additional Details:**
+- Customer/Owner Name
+- Contact Number
+- Usage Type (Private, Commercial, etc.)
+- Category (Authorized to move, Total Loss, etc.)
+- Remarks/Notes
+- Any other relevant information
+
+Return your response in JSON format:
+{
+    "summary": "Brief 1-2 sentence summary of what this document is about",
+    "document_info": {
+        "document_type": "type of document",
+        "reference_number": "reference/claim number",
+        "policy_number": "insurance policy number",
+        "date": "document date"
+    },
+    "accident_details": {
+        "date_time": "date and time of accident",
+        "location": "full location/address",
+        "police_division": "police station/division",
+        "area_contact": "area code and contact number",
+        "description": "detailed description of what happened"
+    },
+    "vehicle_info": {
+        "registration": "vehicle number/plate",
+        "type_color": "vehicle type and color",
+        "make": "manufacturer",
+        "model": "model name",
+        "year": "year",
+        "vin": "VIN/chassis number",
+        "engine": "engine number"
+    },
+    "driver_info": {
+        "name": "driver name",
+        "age": "driver age",
+        "nic": "NIC/ID number",
+        "license_number": "DL number",
+        "license_expiry": "expiry date",
+        "license_class": "class"
+    },
+    "damage_info": {
+        "vehicle_damages": ["list", "of", "damaged", "parts"],
+        "goods_damage": "damage to goods in vehicle or 'None'",
+        "personal_injuries": "injuries or 'None'",
+        "third_party_damage": "third party damages or 'None'",
+        "third_party_vehicles": "vehicle numbers or 'None'",
+        "property_damage": "property damage or 'None'"
+    },
+    "additional_info": {
+        "customer_name": "owner/customer name",
+        "contact": "contact number",
+        "usage": "usage type",
+        "category": "category/authorization status",
+        "remarks": "any remarks or notes"
+    }
+}
+
+CRITICAL INSTRUCTIONS:
+1. You MUST return the COMPLETE JSON structure with ALL sections (summary, document_info, accident_details, vehicle_info, driver_info, damage_info, additional_info)
+2. Extract ANY text visible in the document - forms, tables, handwritten text, printed text
+3. If a field is not found, use null, but ALWAYS include the field in the response
+4. Read ALL text in the image carefully - numbers, dates, names, addresses, descriptions
+5. Return ONLY valid JSON - no explanations or markdown outside the JSON
+
+Return the complete JSON structure now:"""
+            
+            # Process file
+            if file_ext == 'pdf':
+                import fitz
+                doc = fitz.open(filepath)
+                
+                # Process first page (usually has vehicle info)
+                if len(doc) > 0:
+                    page = doc[0]
+                    pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
+                    image_bytes = pix.tobytes("png")
+                    image_data = base64.b64encode(image_bytes).decode('utf-8')
+                    
+                    response = client.chat.completions.create(
+                        model="gpt-4o-2024-11-20",
+                        messages=[
+                            {"role": "system", "content": vehicle_prompt},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": "Extract vehicle information from this document:"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{image_data}",
+                                            "detail": "high"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=4000,
+                        temperature=0.2
+                    )
+                doc.close()
+            else:
+                # Image file
+                with open(filepath, 'rb') as f:
+                    image_data = base64.b64encode(f.read()).decode('utf-8')
+                
+                mime_type = f"image/{file_ext}" if file_ext != 'jpg' else 'image/jpeg'
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o-2024-11-20",
+                    messages=[
+                        {"role": "system", "content": vehicle_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Analyze this document image and extract ALL information. Return the complete JSON with all sections filled:"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime_type};base64,{image_data}",
+                                        "detail": "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=4000,
+                    temperature=0.2
+                )
+            
+            result_text = response.choices[0].message.content
+            print(f"[Vehicle Info API] Raw response length: {len(result_text)}", flush=True)
+            print(f"[Vehicle Info API] First 1000 chars: {result_text[:1000]}", flush=True)
+            
+            # Parse JSON from response
+            try:
+                json_text = result_text
+                if "```json" in result_text:
+                    json_text = result_text.split("```json")[1].split("```")[0]
+                elif "```" in result_text:
+                    json_text = result_text.split("```")[1].split("```")[0]
+                
+                result = json.loads(json_text.strip())
+                result['success'] = True
+                print(f"[Vehicle Info API] Parsed result keys: {list(result.keys())}", flush=True)
+                print(f"[Vehicle Info API] Full result: {json.dumps(result, indent=2)[:2000]}", flush=True)
+                return jsonify(result)
+            except json.JSONDecodeError as e:
+                print(f"[Vehicle Info API] JSON parse error: {e}", flush=True)
+                print(f"[Vehicle Info API] Attempted to parse: {json_text[:500] if 'json_text' in dir() else result_text[:500]}", flush=True)
+                return jsonify({
+                    'success': True,
+                    'vehicle_info': {},
+                    'document_info': {},
+                    'raw_text': result_text,
+                    'note': 'Could not parse structured data'
+                })
+        finally:
+            # Clean up uploaded file
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except:
+                pass
+                
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/combined-analysis', methods=['POST'])
+def combined_analysis():
+    """
+    Combined analysis endpoint that processes a PDF or image to:
+    1. Detect vehicle damage from vehicle images
+    2. Translate and extract data from estimation documents
+    3. Extract vehicle information (make, model, registration)
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({'error': 'No file provided'}), 400
+        
+        file = request.files['file']
+        if file.filename == '':
+            return jsonify({'error': 'No file selected'}), 400
+        
+        # Save uploaded file temporarily
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"combined_{timestamp}_{file.filename}"
+        filepath = os.path.join(UPLOAD_FOLDER, filename)
+        file.save(filepath)
+        
+        # Check file type
+        file_ext = filename.rsplit('.', 1)[1].lower() if '.' in filename else ''
+        is_pdf = file_ext == 'pdf'
+        is_image = file_ext in {'png', 'jpg', 'jpeg', 'tiff', 'tif'}
+        
+        if not is_pdf and not is_image:
+            return jsonify({'error': 'Unsupported file type. Please upload PDF or image files.'}), 400
+        
+        try:
+            from openai import OpenAI
+            
+            api_key = os.getenv("OPENAI_API_KEY")
+            if not api_key:
+                return jsonify({'error': 'OpenAI API key not configured.'}), 500
+            
+            client = OpenAI(api_key=api_key.strip())
+            
+            # Combined analysis prompt
+            combined_prompt = '''You are an expert at analyzing vehicle damage assessment documents.
+            
+Analyze this image and determine what type of content it contains, then extract relevant information.
+
+The image could be:
+1. A VEHICLE IMAGE - showing a car with damage
+2. An ESTIMATION DOCUMENT - a handwritten or printed document with repair costs (may be in Sinhala, Tamil, Hindi, or English)
+3. A COMBINED document with both vehicle info and costs
+
+For EACH image, extract ALL applicable information:
+
+VEHICLE INFORMATION (if visible):
+- Look for the vehicle in the image or any text mentioning vehicle details
+- Extract: make, model, year, color, registration/license plate number
+
+DAMAGE DETECTION (if vehicle image):
+- Identify all visible damage types (dents, scratches, broken glass, etc.)
+- Assess severity (Minor, Moderate, Severe, Critical)
+- Describe the damage location and extent
+
+ESTIMATION DATA (if document):
+- Translate any non-English text to English
+- Read numbers EXACTLY as written - count every digit carefully
+- Extract line items with Description, Estimate price (blue), and Approved price (red/checkmark)
+
+CRITICAL NUMBER READING:
+- Count EVERY digit - do NOT miss trailing zeros
+- If you see 3500, it's 4 digits (3-5-0-0), not 350
+- If you see 1500, it's 4 digits (1-5-0-0), not 15000
+- Read exactly what is written
+
+Return your analysis in this JSON format:
+{
+    "content_type": "vehicle_image" or "estimation_document" or "combined",
+    "vehicle_info": {
+        "make": "Vehicle manufacturer (e.g., Toyota, Honda)",
+        "model": "Vehicle model (e.g., Corolla, Civic)",
+        "year": "Year if visible",
+        "color": "Vehicle color",
+        "registration": "License plate/registration number"
+    },
+    "damage_detection": {
+        "damages": ["List of damage types detected"],
+        "severity": "Minor/Moderate/Severe/Critical",
+        "description": "Detailed description of damage",
+        "affected_parts": ["List of affected parts"]
+    },
+    "estimation_data": {
+        "source_language": "Detected language",
+        "table_data": [
+            {"description": "Item in English", "estimate": "Amount", "approved": "Amount or ✓"}
+        ],
+        "totals": {
+            "estimate_total": "Sum of estimates",
+            "approved_total": "Sum of approved"
+        }
+    },
+    "document_info": {
+        "company_name": "Workshop/garage name",
+        "date": "Document date",
+        "reference_number": "Invoice/ref number",
+        "phone": "Contact number"
+    }
+}
+
+Only include sections that are applicable to the content. Be thorough and accurate.'''
+
+            all_results = []
+            annotated_images = []
+            
+            if is_pdf:
+                # Process each page of PDF
+                import fitz
+                doc = fitz.open(filepath)
+                
+                for i, page in enumerate(doc):
+                    # Convert page to image
+                    mat = fitz.Matrix(2, 2)  # 2x zoom for better quality
+                    pix = page.get_pixmap(matrix=mat)
+                    image_bytes = pix.tobytes("png")
+                    image_data = base64.b64encode(image_bytes).decode('utf-8')
+                    
+                    # Analyze with GPT-4 Vision
+                    response = client.chat.completions.create(
+                        model="gpt-4o-2024-11-20",
+                        messages=[
+                            {"role": "system", "content": combined_prompt},
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": f"Analyze page {i+1} of this document:"},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {
+                                            "url": f"data:image/png;base64,{image_data}",
+                                            "detail": "high"
+                                        }
+                                    }
+                                ]
+                            }
+                        ],
+                        max_tokens=4000,
+                        temperature=0.1
+                    )
+                    
+                    result_text = response.choices[0].message.content
+                    
+                    # Parse JSON from response
+                    try:
+                        if "```json" in result_text:
+                            result_text = result_text.split("```json")[1].split("```")[0]
+                        elif "```" in result_text:
+                            result_text = result_text.split("```")[1].split("```")[0]
+                        
+                        page_result = json.loads(result_text.strip())
+                        page_result['page_number'] = i + 1
+                        all_results.append(page_result)
+                        
+                        # If it's a vehicle image, run damage detection with annotation
+                        if page_result.get('content_type') == 'vehicle_image' or page_result.get('damage_detection', {}).get('damages'):
+                            # Save page as temp image for annotation
+                            temp_img_path = os.path.join(UPLOAD_FOLDER, f"temp_page_{i+1}_{timestamp}.png")
+                            with open(temp_img_path, 'wb') as f:
+                                f.write(image_bytes)
+                            
+                            # Try to get annotated image from damage detection
+                            try:
+                                from openai_gpt_vision import _analyze_single_image
+                                report, annotated_path, damages_list = _analyze_single_image(temp_img_path, highlight_damage=True)
+                                
+                                if annotated_path and os.path.exists(annotated_path):
+                                    # Convert annotated image to base64
+                                    with open(annotated_path, 'rb') as img_file:
+                                        annotated_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                                    
+                                    annotated_images.append({
+                                        'page': i + 1,
+                                        'image': f"data:image/jpeg;base64,{annotated_base64}",
+                                        'damages': damages_list
+                                    })
+                                    
+                                    # Clean up annotated image file
+                                    try:
+                                        os.remove(annotated_path)
+                                    except:
+                                        pass
+                            except Exception as e:
+                                print(f"Damage detection error: {e}")
+                                import traceback
+                                traceback.print_exc()
+                            finally:
+                                if os.path.exists(temp_img_path):
+                                    os.remove(temp_img_path)
+                                    
+                    except json.JSONDecodeError:
+                        all_results.append({
+                            'page_number': i + 1,
+                            'raw_text': result_text,
+                            'error': 'Could not parse JSON'
+                        })
+                
+                doc.close()
+                
+            else:
+                # Process single image
+                with open(filepath, 'rb') as f:
+                    image_data = base64.b64encode(f.read()).decode('utf-8')
+                
+                mime_type = f"image/{file_ext}" if file_ext != 'jpg' else 'image/jpeg'
+                
+                response = client.chat.completions.create(
+                    model="gpt-4o-2024-11-20",
+                    messages=[
+                        {"role": "system", "content": combined_prompt},
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": "Analyze this image:"},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime_type};base64,{image_data}",
+                                        "detail": "high"
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    max_tokens=4000,
+                    temperature=0.1
+                )
+                
+                result_text = response.choices[0].message.content
+                
+                try:
+                    if "```json" in result_text:
+                        result_text = result_text.split("```json")[1].split("```")[0]
+                    elif "```" in result_text:
+                        result_text = result_text.split("```")[1].split("```")[0]
+                    
+                    page_result = json.loads(result_text.strip())
+                    all_results.append(page_result)
+                    
+                    # If it's a vehicle image, try damage detection with annotation
+                    if page_result.get('content_type') == 'vehicle_image' or page_result.get('damage_detection', {}).get('damages'):
+                        try:
+                            from openai_gpt_vision import _analyze_single_image
+                            report, annotated_path, damages_list = _analyze_single_image(filepath, highlight_damage=True)
+                            
+                            if annotated_path and os.path.exists(annotated_path):
+                                # Convert annotated image to base64
+                                with open(annotated_path, 'rb') as img_file:
+                                    annotated_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+                                
+                                annotated_images.append({
+                                    'page': 1,
+                                    'image': f"data:image/jpeg;base64,{annotated_base64}",
+                                    'damages': damages_list
+                                })
+                                
+                                # Clean up annotated image file
+                                try:
+                                    os.remove(annotated_path)
+                                except:
+                                    pass
+                        except Exception as e:
+                            print(f"Damage detection error: {e}")
+                            import traceback
+                            traceback.print_exc()
+                            
+                except json.JSONDecodeError:
+                    all_results.append({
+                        'raw_text': result_text,
+                        'error': 'Could not parse JSON'
+                    })
+            
+            # Combine all results
+            combined_result = {
+                'success': True,
+                'pages_processed': len(all_results),
+                'vehicle_info': {},
+                'damage_detection': {},
+                'estimation_data': {
+                    'table_data': [],
+                    'totals': {}
+                },
+                'document_info': {}
+            }
+            
+            for result in all_results:
+                # Merge vehicle info
+                if result.get('vehicle_info'):
+                    for key, value in result['vehicle_info'].items():
+                        if value and not combined_result['vehicle_info'].get(key):
+                            combined_result['vehicle_info'][key] = value
+                
+                # Merge damage detection
+                if result.get('damage_detection'):
+                    dd = result['damage_detection']
+                    if dd.get('damages'):
+                        existing = combined_result['damage_detection'].get('damages', [])
+                        combined_result['damage_detection']['damages'] = list(set(existing + dd['damages']))
+                    if dd.get('severity') and not combined_result['damage_detection'].get('severity'):
+                        combined_result['damage_detection']['severity'] = dd['severity']
+                    if dd.get('description'):
+                        existing = combined_result['damage_detection'].get('description', '')
+                        combined_result['damage_detection']['description'] = existing + (' ' if existing else '') + dd['description']
+                
+                # Merge estimation data
+                if result.get('estimation_data'):
+                    ed = result['estimation_data']
+                    if ed.get('table_data'):
+                        combined_result['estimation_data']['table_data'].extend(ed['table_data'])
+                    if ed.get('source_language'):
+                        combined_result['estimation_data']['source_language'] = ed['source_language']
+                    if ed.get('totals'):
+                        combined_result['estimation_data']['totals'] = ed['totals']
+                
+                # Merge document info
+                if result.get('document_info'):
+                    for key, value in result['document_info'].items():
+                        if value and not combined_result['document_info'].get(key):
+                            combined_result['document_info'][key] = value
+            
+            # Add annotated image if available
+            if annotated_images:
+                combined_result['damage_detection']['annotated_image'] = annotated_images[0]['image']
+            
+            # Remove empty sections
+            if not combined_result['vehicle_info']:
+                del combined_result['vehicle_info']
+            if not combined_result['damage_detection']:
+                del combined_result['damage_detection']
+            if not combined_result['estimation_data']['table_data']:
+                del combined_result['estimation_data']
+            if not combined_result['document_info']:
+                del combined_result['document_info']
+            
+            return jsonify(combined_result)
+            
+        except Exception as api_error:
+            print(f"DEBUG: Combined analysis error: {str(api_error)}")
+            import traceback
+            traceback.print_exc()
+            return jsonify({'error': f'Error processing file: {str(api_error)}'}), 500
+        finally:
+            try:
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+            except:
+                pass
+                
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/translation-config', methods=['GET'])
+def translation_config():
+    """Get the current translation API configuration status."""
+    use_mock = os.environ.get('USE_MOCK_TRANSLATION', 'false').lower() == 'true'
+    openai_configured = bool(os.getenv("OPENAI_API_KEY"))
+    
+    # Check Google Cloud support
+    google_configured = False
+    try:
+        from google.cloud import vision
+        from google.cloud import translate_v2
+        google_configured = True
+    except ImportError:
+        pass
+    
+    # Check PDF support
+    pdf_support = False
+    try:
+        import fitz
+        pdf_support = True
+    except ImportError:
+        try:
+            from pdf2image import convert_from_path
+            pdf_support = True
+        except ImportError:
+            pass
+    
+    supported = ['png', 'jpg', 'jpeg', 'tiff', 'tif']
+    if pdf_support:
+        supported.insert(0, 'pdf')
+    
+    return jsonify({
+        'feature_providers': {
+            'damage_detection': {
+                'provider': 'OpenAI GPT-4 Vision',
+                'configured': openai_configured,
+                'description': 'Always uses GPT-4 Vision for damage analysis'
+            },
+            'vehicle_info_extraction': {
+                'provider': 'OpenAI GPT-4 Vision',
+                'configured': openai_configured,
+                'description': 'Always uses GPT-4 Vision for vehicle details extraction'
+            },
+            'document_translation': {
+                'provider': 'Google Cloud Vision' if google_configured else 'OpenAI GPT-4 Vision (fallback)',
+                'configured': google_configured or openai_configured,
+                'description': 'Uses Google Vision OCR for translation (falls back to OpenAI if unavailable)'
+            }
+        },
+        'providers_status': {
+            'openai': {
+                'name': 'OpenAI GPT-4 Vision',
+                'configured': openai_configured
+            },
+            'google': {
+                'name': 'Google Cloud Vision + Translate',
+                'configured': google_configured,
+                'setup_hint': 'Run: pip install google-cloud-vision google-cloud-translate' if not google_configured else None
+            }
+        },
+        'supported_formats': supported,
+        'pdf_support': pdf_support,
+        'mock_mode': use_mock
+    })
+
+
 if __name__ == '__main__':
     import socket
     import urllib.request
@@ -1575,31 +5254,31 @@ if __name__ == '__main__':
     print("Vehicle Damage Detection Web Application")
     print("=" * 70)
     print("\nStarting server...")
-    print(f"\n📍 Access from this device:")
+    print(f"\n[LOCAL] Access from this device:")
     print(f"   http://localhost:5000")
     print(f"   http://127.0.0.1:5000")
-    print(f"\n🌐 Access from other devices on the same network:")
+    print(f"\n[NETWORK] Access from other devices on the same network:")
     print(f"   http://{local_ip}:5000")
     
     if public_ip:
-        print(f"\n🌍 Public IP (requires port forwarding):")
+        print(f"\n[PUBLIC] Public IP (requires port forwarding):")
         print(f"   http://{public_ip}:5000")
-        print(f"   ⚠️  You need to configure port forwarding on your router")
-        print(f"   ⚠️  External port 5000 → {local_ip}:5000")
+        print(f"   [!] You need to configure port forwarding on your router")
+        print(f"   [!] External port 5000 -> {local_ip}:5000")
     
-    print(f"\n💡 For easy external access, use ngrok:")
+    print(f"\n[TIP] For easy external access, use ngrok:")
     print(f"   1. Install ngrok from https://ngrok.com")
     print(f"   2. Run: ngrok http 5000")
     print(f"   3. Use the provided HTTPS URL")
     
-    print(f"\n⚠️  SECURITY WARNING:")
+    print(f"\n[!] SECURITY WARNING:")
     print(f"   - Server is in DEBUG mode (not secure for production)")
     print(f"   - No authentication enabled")
     print(f"   - Only expose to internet if you understand the risks")
     print(f"   - For production, disable debug mode and add authentication")
     
-    print(f"\n⚠️  Make sure both devices are on the same Wi-Fi/network for local access")
-    print(f"⚠️  Windows Firewall may prompt for permission - allow it")
+    print(f"\n[!] Make sure both devices are on the same Wi-Fi/network for local access")
+    print(f"[!] Windows Firewall may prompt for permission - allow it")
     print(f"\nPress Ctrl+C to stop the server")
     print("=" * 70)
     
