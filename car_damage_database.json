@@ -1,0 +1,232 @@
+{
+    "cars": [
+      {
+        "make": "Toyota",
+        "model": "Innova Crysta",
+        "year": 2020,
+        "damage": {
+          "scratch": {
+            "minor": 1200,
+            "moderate": 2800,
+            "major": 4800
+          },
+          "dent": {
+            "minor": 2000,
+            "moderate": 4500,
+            "major": 8500
+          },
+          "broken_headlight": {
+            "minor": 3500,
+            "moderate": 6500,
+            "major": 12000
+          },
+          "broken_windshield": {
+            "minor": 6000,
+            "moderate": 12000,
+            "major": 18000
+          },
+          "bumper_damage": {
+            "minor": 2500,
+            "moderate": 5500,
+            "major": 9500
+          },
+          "door_damage": {
+            "minor": 3000,
+            "moderate": 7500,
+            "major": 14000
+          }
+        }
+      },
+  
+      {
+        "make": "Toyota",
+        "model": "Fortuner",
+        "year": 2021,
+        "damage": {
+          "scratch": {
+            "minor": 1800,
+            "moderate": 4000,
+            "major": 7000
+          },
+          "dent": {
+            "minor": 3500,
+            "moderate": 7000,
+            "major": 13000
+          },
+          "broken_headlight": {
+            "minor": 7000,
+            "moderate": 12000,
+            "major": 18000
+          },
+          "broken_windshield": {
+            "minor": 9000,
+            "moderate": 15000,
+            "major": 28000
+          },
+          "bumper_damage": {
+            "minor": 4500,
+            "moderate": 8500,
+            "major": 16000
+          },
+          "door_damage": {
+            "minor": 5000,
+            "moderate": 12000,
+            "major": 20000
+          }
+        }
+      },
+  
+      {
+        "make": "Volkswagen",
+        "model": "Polo",
+        "year": 2019,
+        "damage": {
+          "scratch": {
+            "minor": 1000,
+            "moderate": 2200,
+            "major": 3500
+          },
+          "dent": {
+            "minor": 1800,
+            "moderate": 3800,
+            "major": 7000
+          },
+          "broken_headlight": {
+            "minor": 3000,
+            "moderate": 5500,
+            "major": 9000
+          },
+          "broken_windshield": {
+            "minor": 5000,
+            "moderate": 9500,
+            "major": 15000
+          },
+          "bumper_damage": {
+            "minor": 2000,
+            "moderate": 4500,
+            "major": 8500
+          },
+          "door_damage": {
+            "minor": 2500,
+            "moderate": 6200,
+            "major": 10000
+          }
+        }
+      },
+  
+      {
+        "make": "Skoda",
+        "model": "Octavia",
+        "year": 2020,
+        "damage": {
+          "scratch": {
+            "minor": 1600,
+            "moderate": 3200,
+            "major": 5400
+          },
+          "dent": {
+            "minor": 2500,
+            "moderate": 5200,
+            "major": 9000
+          },
+          "broken_headlight": {
+            "minor": 5500,
+            "moderate": 9500,
+            "major": 16000
+          },
+          "broken_windshield": {
+            "minor": 8000,
+            "moderate": 15000,
+            "major": 24000
+          },
+          "bumper_damage": {
+            "minor": 3500,
+            "moderate": 6000,
+            "major": 11000
+          },
+          "door_damage": {
+            "minor": 4000,
+            "moderate": 9000,
+            "major": 16000
+          }
+        }
+      },
+  
+      {
+        "make": "Mercedes",
+        "model": "C-Class",
+        "year": 2022,
+        "damage": {
+          "scratch": {
+            "minor": 3000,
+            "moderate": 5500,
+            "major": 9000
+          },
+          "dent": {
+            "minor": 6000,
+            "moderate": 11000,
+            "major": 18000
+          },
+          "broken_headlight": {
+            "minor": 12000,
+            "moderate": 20000,
+            "major": 32000
+          },
+          "broken_windshield": {
+            "minor": 15000,
+            "moderate": 28000,
+            "major": 40000
+          },
+          "bumper_damage": {
+            "minor": 7000,
+            "moderate": 15000,
+            "major": 26000
+          },
+          "door_damage": {
+            "minor": 9000,
+            "moderate": 20000,
+            "major": 35000
+          }
+        }
+      },
+  
+      {
+        "make": "Mercedes",
+        "model": "GLE",
+        "year": 2021,
+        "damage": {
+          "scratch": {
+            "minor": 4000,
+            "moderate": 7500,
+            "major": 12000
+          },
+          "dent": {
+            "minor": 7500,
+            "moderate": 14000,
+            "major": 24000
+          },
+          "broken_headlight": {
+            "minor": 18000,
+            "moderate": 28000,
+            "major": 42000
+          },
+          "broken_windshield": {
+            "minor": 20000,
+            "moderate": 35000,
+            "major": 50000
+          },
+          "bumper_damage": {
+            "minor": 9000,
+            "moderate": 18000,
+            "major": 32000
+          },
+          "door_damage": {
+            "minor": 12000,
+            "moderate": 25000,
+            "major": 40000
+          }
+        }
+      }
+    ]
+  }
+  
