@@ -128,58 +128,132 @@ def translate_and_extract_with_gpt(extracted_text: str, document_type: str = "es
     client = OpenAI(api_key=api_key)
     
     if document_type == "estimation":
-        prompt = """You are an EXPERT document analyst for vehicle repair estimation documents from Sri Lanka.
+        prompt = """# ROLE
+You are an **EXPERT document analyst** specializing in **Sri Lankan vehicle repair estimation and insurance approval documents**.
 
-The OCR text below was extracted from a TABULAR DOCUMENT with this structure:
-- LEFT: Item descriptions (numbered rows)
-- PRICE COLUMN: Contains BOTH estimate AND approved prices
-  * ESTIMATE = BLACK ink numbers (original garage quote) - may be SCRATCHED/CROSSED OUT
-  * APPROVED = RED ink numbers (inspector's corrected/approved amount)
-- SECTIONS: Labour, Repair & Straight, Booth Painting, Material/Spare Parts
+These documents contain **garage estimates** and **insurance inspector approvals**, often handwritten, corrected, and partially overwritten.
 
-COLOR RULE: BLACK = Estimate (original), RED = Approved (corrected)
+---
 
-CRITICAL RULES:
-===============
-1. The OCR text may have numbers scattered - you must match them to the correct row
-2. Common Sri Lankan repair amounts: 500, 800, 1000, 1200, 1500, 1800, 2000, 2500, 3000, 4000, 4200, 5000, 8000, 8500, 10000, 12000, 18500
-3. Look for patterns: item name followed by its estimate, then its approved amount
-4. "/-" or "/=" suffix marks the end of amounts
-5. Negative numbers = deductions or rejections
-6. "SH" means spare parts reference
-7. "deleted" or "jacked" means item was rejected
+## DOCUMENT CHARACTERISTICS
+The OCR text below was extracted from a **TABULAR DOCUMENT**. Visual layout may be imperfect due to OCR, but the logical structure is:
 
-MATCHING NUMBERS TO ROWS:
-========================
-- Each numbered item (1, 2, 3, etc.) should have at most 2 numbers: estimate and approved
-- If you see numbers near an item name, the FIRST is likely estimate, SECOND is approved
-- If only one number, determine if it's estimate or approved based on context
+- **LEFT COLUMN**: Line item descriptions (repair parts, labour items)
+- **PRICE / ESTIMATE COLUMN**:
+  - Contains **both Estimated and Approved values**
+  - Values may appear **left or right of each other**
+  - Values may be **scratched, crossed, ticked, or overwritten**
+- **SECTIONS MAY INCLUDE**:
+  - Labour
+  - Repair & Straight
+  - Booth Painting
+  - Material / Spare Parts
 
-Return ONLY this JSON format:
+---
+
+## LANGUAGE RULES
+- Item descriptions may be in **Sinhala or English**
+- Column headers like **"Price", "Estimate", "Estimated Amount"** may appear in **Sinhala or English**
+- Translate **all extracted content into English**
+
+---
+
+## COLUMN SEMANTIC HEURISTIC (IMPORTANT)
+- Numeric values appearing **directly below or nearest to column headers** such as  
+  **"Price", "Estimate", "Estimated Amount"** (English or Sinhala)  
+  should be treated as the **ORIGINAL GARAGE ESTIMATE by default**.
+- These estimate values are typically written in **BLACK or BLUE ink**.
+- If a **RED ink value** appears near the same row, it usually represents the  
+  **INSPECTOR-APPROVED amount overriding the estimate**.
+- This is a **heuristic, not an absolute rule**. Always validate using:
+  - Color semantics
+  - Scratches / crossings
+  - Tick marks
+  - Relative value comparison
+
+---
+
+## COLOR & SEMANTIC RULES
+- **BLACK / BLUE ink → ESTIMATED amount**
+  - Original garage quotation
+  - May be **scratched or crossed out** if reduced
+- **RED ink → APPROVED amount**
+  - Inspector-approved value
+- **Tick mark (✓)** → Inspector accepted the estimate as-is
+- **Scratched estimate** → Approved amount is **lower than estimate**
+- Keywords like **"deleted", "jacked", "cut", "rejected"** → Item not approved
+
+---
+
+## NUMERIC INTERPRETATION RULES
+1. Each numbered row may contain:
+   - **Two numbers** → Estimate and Approved
+   - **One number** → Determine type using context
+2. **Do NOT assume numeric order** (estimate may appear before or after approved)
+3. Amounts may end with `/=`, `/-`, `Rs`, or no suffix
+4. **Negative values** indicate deductions
+5. Common Sri Lankan repair amounts include (not exhaustive):  
+   `500, 800, 1000, 1200, 1500, 1800, 2000, 2500, 3000, 4000, 4200, 5000, 8000, 8500, 10000, 12000, 18500`
+6. `"SH"` refers to **Spare Parts**
+
+---
+
+## ROW MATCHING RULES
+- Match numeric values to the **nearest logical item description**
+- Prefer values located **under or near "Price / Estimate" columns**
+- If two values exist:
+  - The **higher value** is usually the **estimate**
+  - The **lower value** (often red) is the **approved**
+- If only one value exists:
+  - If ticked → approved = estimate
+  - Otherwise → estimate only
+
+---
+
+## CRITICAL CONSTRAINTS
+- ❌ Do NOT invent numbers
+- ❌ Do NOT guess missing values
+- ✅ Copy numeric values **exactly as they appear**
+- ✅ Extract **EVERY numbered row**, even if rejected
+
+---
+
+## OUTPUT FORMAT (STRICT)
+Return **ONLY valid JSON** in the following structure:
+
 {
-    "source_language": "English",
-    "translated_text": "Company header and notes",
-    "document_info": {
-        "company_name": "Workshop name",
-        "reference_number": "Est NO",
-        "document_date": "Date",
-        "vehicle_info": "Vehicle details"
-    },
-    "table_data": [
-        {"description": "Item name", "estimate": "Amount or '-'", "approved": "Amount or '✓' or '-'"}
-    ],
-    "totals": {
-        "estimate_total": "Sum of estimates",
-        "approved_total": "Sum of approved",
-        "grand_total": "Grand total from document",
-        "difference": "Difference"
+  "source_language": "Sinhala / English / Mixed",
+  "translated_text": "English translation of company header and handwritten notes",
+  "document_info": {
+    "company_name": "Workshop name",
+    "reference_number": "Estimate / Quotation number",
+    "document_date": "Date",
+    "vehicle_info": "Vehicle details if present"
+  },
+  "table_data": [
+    {
+      "description": "Translated item name",
+      "estimate": "Numeric amount or '-'",
+      "approved": "Numeric amount or '✓' or '-'"
     }
+  ],
+  "totals": {
+    "estimate_total": "As written or '-'",
+    "approved_total": "As written or '-'",
+    "grand_total": "As written or '-'",
+    "difference": "Approved minus estimate"
+  }
 }
 
-VERIFICATION:
-- Extract EVERY numbered row
-- Copy numbers EXACTLY as they appear in the OCR text
-- Don't invent or guess numbers
+---
+
+## FINAL VERIFICATION
+
+Before responding:
+- Ensure all numbered rows were processed
+- Ensure Sinhala text is translated
+- Ensure reduced / rejected items are accurately reflected
+- Ensure no values were invented or inferred
 
 Extracted text from OCR:
 """
