@@ -38,6 +38,15 @@ try:
 except ImportError:
     GOOGLE_VISION_HELPER_AVAILABLE = False
 
+# Import Roboflow damage detection
+try:
+    from roboflow_damage_detection import detect_damage_roboflow, ROBOFLOW_AVAILABLE
+    ROBOFLOW_CONFIGURED = bool(os.environ.get('ROBOFLOW_API_KEY'))
+except ImportError:
+    ROBOFLOW_AVAILABLE = False
+    ROBOFLOW_CONFIGURED = False
+
+
 app = Flask(__name__)
 CORS(app)
 
@@ -1146,6 +1155,29 @@ HTML_TEMPLATE = '''
                     <p style="margin-bottom: 20px; font-size: 0.95em; color: #7c3aed;">
                         Upload vehicle images to detect and annotate damage
                     </p>
+                    
+                    <!-- Detection Provider Toggle -->
+                    <div id="detectionProviderToggle" style="margin-bottom: 20px; padding: 15px; background: white; border-radius: 12px; border: 2px solid #e5e7eb;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px;">
+                            <span style="font-weight: 600; color: #374151; font-size: 0.9em;">🤖 Detection Provider:</span>
+                            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 16px; border-radius: 20px; background: #ede9fe; border: 2px solid #8b5cf6; transition: all 0.2s;" id="providerLabelOpenai">
+                                    <input type="radio" name="detectionProvider" value="openai" checked style="accent-color: #8b5cf6;">
+                                    <span style="font-size: 0.85em; color: #374151;">OpenAI GPT-4o</span>
+                                    <span style="font-size: 0.7em; background: #10b981; color: white; padding: 2px 6px; border-radius: 10px;">✓ Ready</span>
+                                </label>
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; padding: 8px 16px; border-radius: 20px; background: #f3f4f6; transition: all 0.2s;" id="providerLabelRoboflow">
+                                    <input type="radio" name="detectionProvider" value="roboflow" id="roboflowRadio" style="accent-color: #06b6d4;">
+                                    <span style="font-size: 0.85em; color: #374151;">Roboflow</span>
+                                    <span id="roboflowStatus" style="font-size: 0.7em; background: #6b7280; color: white; padding: 2px 6px; border-radius: 10px;">Checking...</span>
+                                </label>
+                            </div>
+                        </div>
+                        <p id="providerDescription" style="margin-top: 10px; font-size: 0.8em; color: #6b7280;">
+                            <strong>OpenAI GPT-4o:</strong> Best for context understanding, works with document hints
+                        </p>
+                    </div>
+                    
                     <div class="file-input-wrapper">
                         <input type="file" id="combinedDamageInput" class="file-input" accept="image/*">
                         <label for="combinedDamageInput" class="doc-input-label" style="background: linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%);">
@@ -1540,6 +1572,68 @@ HTML_TEMPLATE = '''
 
         // Load vehicle data when page loads
         loadVehicleData();
+        
+        // Check all detection providers availability and update UI
+        async function checkDetectionProviders() {
+            try {
+                const response = await fetch('/api/translation-config');
+                const data = await response.json();
+                
+                // Check Roboflow
+                const roboflowStatus = document.getElementById('roboflowStatus');
+                const roboflowRadio = document.getElementById('roboflowRadio');
+                const providerLabelRoboflow = document.getElementById('providerLabelRoboflow');
+                
+                if (data.providers_status && data.providers_status.roboflow) {
+                    const roboflow = data.providers_status.roboflow;
+                    if (roboflow.configured) {
+                        roboflowStatus.textContent = '✓ Ready';
+                        roboflowStatus.style.background = '#10b981';
+                        roboflowRadio.disabled = false;
+                        providerLabelRoboflow.style.opacity = '1';
+                        providerLabelRoboflow.style.cursor = 'pointer';
+                    } else {
+                        roboflowStatus.textContent = 'Not configured';
+                        roboflowStatus.style.background = '#ef4444';
+                        roboflowRadio.disabled = true;
+                        providerLabelRoboflow.style.opacity = '0.5';
+                        providerLabelRoboflow.style.cursor = 'not-allowed';
+                        providerLabelRoboflow.title = roboflow.setup_hint || 'Set ROBOFLOW_API_KEY';
+                    }
+                }
+                
+            } catch (error) {
+                console.error('Error checking providers:', error);
+            }
+        }
+        
+        // Update provider description when selection changes
+        document.querySelectorAll('input[name="detectionProvider"]').forEach(radio => {
+            radio.addEventListener('change', function() {
+                const desc = document.getElementById('providerDescription');
+                const labelOpenai = document.getElementById('providerLabelOpenai');
+                const labelRoboflow = document.getElementById('providerLabelRoboflow');
+                
+                // Reset all backgrounds
+                labelOpenai.style.background = '#f3f4f6';
+                labelOpenai.style.border = '2px solid transparent';
+                labelRoboflow.style.background = '#f3f4f6';
+                labelRoboflow.style.border = '2px solid transparent';
+                
+                if (this.value === 'openai') {
+                    desc.innerHTML = '<strong>OpenAI GPT-4o:</strong> Best for context understanding, works with document hints from estimation documents';
+                    labelOpenai.style.background = '#ede9fe';
+                    labelOpenai.style.border = '2px solid #8b5cf6';
+                } else if (this.value === 'roboflow') {
+                    desc.innerHTML = "<strong>Roboflow:</strong> Pre-trained object detection model, faster but does not use document hints";
+                    labelRoboflow.style.background = '#cffafe';
+                    labelRoboflow.style.border = '2px solid #06b6d4';
+                }
+            });
+        });
+        
+        // Check detection providers on page load
+        checkDetectionProviders();
 
         // File input change (for vehicle images)
         fileInput.addEventListener('change', function(e) {
@@ -1598,9 +1692,9 @@ HTML_TEMPLATE = '''
         document.getElementById('ocrProvider').addEventListener('change', function() {
             const providerNote = document.getElementById('providerNote');
             if (this.value === 'google') {
-                providerNote.textContent = 'Google Cloud Vision with Google Translate for OCR and translation';
+                providerNote.innerHTML = '<strong>Pure Google Pipeline:</strong> Vision API (OCR) → Translate API → Pattern Matching <em>(No AI/GPT)</em>';
             } else {
-                providerNote.textContent = 'GPT-4 Vision provides excellent OCR with intelligent data extraction';
+                providerNote.innerHTML = '<strong>OpenAI Pipeline:</strong> GPT-4 Vision directly analyzes image, translates, and extracts data <em>(All-in-one AI)</em>';
             }
         });
 
@@ -1818,17 +1912,119 @@ HTML_TEMPLATE = '''
             }
         }
         
+        // Store the last translation result for cross-referencing with damage detection
+        let lastTranslationResult = null;
+        // Store vehicle info result (contains damage_info.vehicle_damages)
+        let lastVehicleInfoResult = null;
+        
+        // Function to extract damaged parts from translation result
+        // Handles multiple document formats: estimation documents, accident intimation forms, etc.
+        function extractDamagedParts(translationData) {
+            const parts = [];
+            console.log('[Frontend] Extracting damaged parts from:', translationData);
+            
+            // 1. Check damage_info.vehicle_damages (accident intimation form)
+            if (translationData.damage_info && translationData.damage_info.vehicle_damages) {
+                const damages = translationData.damage_info.vehicle_damages;
+                if (Array.isArray(damages)) {
+                    damages.forEach(damage => {
+                        if (typeof damage === 'string' && damage.trim()) {
+                            parts.push({ part: damage.trim(), type: 'damage' });
+                        } else if (damage && damage.description) {
+                            parts.push({ part: damage.description, type: damage.type || 'damage' });
+                        }
+                    });
+                } else if (typeof damages === 'string' && damages.trim()) {
+                    parts.push({ part: damages.trim(), type: 'damage' });
+                }
+                console.log('[Frontend] Found damage_info.vehicle_damages:', damages);
+            }
+            
+            // 2. Check parsed.damage_info.vehicle_damages
+            if (translationData.parsed && translationData.parsed.damage_info) {
+                const damages = translationData.parsed.damage_info.vehicle_damages;
+                if (Array.isArray(damages)) {
+                    damages.forEach(damage => {
+                        if (typeof damage === 'string' && damage.trim()) {
+                            parts.push({ part: damage.trim(), type: 'damage' });
+                        }
+                    });
+                } else if (typeof damages === 'string' && damages.trim()) {
+                    parts.push({ part: damages.trim(), type: 'damage' });
+                }
+            }
+            
+            // 3. Try to extract from line_items (estimation document)
+            if (translationData.line_items && Array.isArray(translationData.line_items)) {
+                translationData.line_items.forEach(item => {
+                    if (item.description || item.part) {
+                        parts.push({
+                            part: item.description || item.part,
+                            type: item.type || '',
+                            estimated: item.estimated_amount || item.amount,
+                            approved: item.approved_amount
+                        });
+                    }
+                });
+            }
+            
+            // 4. Also check parsed.line_items structure
+            if (translationData.parsed) {
+                if (translationData.parsed.line_items && Array.isArray(translationData.parsed.line_items)) {
+                    translationData.parsed.line_items.forEach(item => {
+                        if (item.description || item.part) {
+                            parts.push({
+                                part: item.description || item.part,
+                                type: item.type || '',
+                                estimated: item.estimated_amount || item.amount,
+                                approved: item.approved_amount
+                            });
+                        }
+                    });
+                }
+            }
+            
+            // 5. Check for damaged_parts array (common format)
+            if (translationData.damaged_parts && Array.isArray(translationData.damaged_parts)) {
+                translationData.damaged_parts.forEach(part => {
+                    if (typeof part === 'string') {
+                        parts.push({ part: part, type: 'damage' });
+                    } else if (part.name || part.part || part.description) {
+                        parts.push({ part: part.name || part.part || part.description, type: part.type || 'damage' });
+                    }
+                });
+            }
+            
+            // Remove duplicates based on part name
+            const uniqueParts = [];
+            const seen = new Set();
+            for (const part of parts) {
+                const key = (part.part || '').toLowerCase().trim();
+                if (key && !seen.has(key)) {
+                    seen.add(key);
+                    uniqueParts.push(part);
+                }
+            }
+            
+            console.log('[Frontend] Final extracted damaged parts:', uniqueParts);
+            return uniqueParts;
+        }
+        
         // Function to run all analyses at once
+        // SMART FLOW: If both damage image and estimation document are uploaded,
+        // run translation FIRST to extract damaged parts, then use those parts
+        // to guide the damage detection for improved accuracy.
         async function runCombinedAnalysisAll() {
             if (!selectedCombinedDamageFile && !selectedCombinedVehicleFile && !selectedCombinedTranslateFile) {
                 alert('Please upload at least one file to analyze.');
                 return;
             }
             
-            // Reset individual times
+            // Reset individual times and translation result
             analysisTimes.damage = null;
             analysisTimes.vehicle = null;
             analysisTimes.translate = null;
+            lastTranslationResult = null;
             
             // Hide previous summary
             document.getElementById('analysisTimeSummary').style.display = 'none';
@@ -1840,31 +2036,71 @@ HTML_TEMPLATE = '''
             // Start the timer
             startTimer();
             
-            const promises = [];
-            
-            // Run damage detection if file is uploaded
-            if (selectedCombinedDamageFile) {
-                promises.push(runCombinedDamageDetectionTimed());
-            }
-            
-            // Run vehicle extraction if file is uploaded
-            if (selectedCombinedVehicleFile) {
-                promises.push(runCombinedVehicleExtractionTimed());
-            }
-            
-            // Run translation if file is uploaded
-            if (selectedCombinedTranslateFile) {
-                promises.push(runCombinedTranslationTimed());
-            }
-            
-            // Wait for all analyses to complete
             try {
-                await Promise.all(promises);
+                // SMART FLOW: Extract document info FIRST, then use it to guide damage detection
+                // This ensures the AI knows which parts to focus on
+                
+                let damageHints = [];
+                let stepNum = 1;
+                const totalSteps = (selectedCombinedTranslateFile ? 1 : 0) + 
+                                   (selectedCombinedVehicleFile ? 1 : 0) + 
+                                   (selectedCombinedDamageFile ? 1 : 0);
+                
+                // Step A: Run translation FIRST if uploaded (gets line_items for estimation docs)
+                if (selectedCombinedTranslateFile) {
+                    combinedAnalyzeStatus.innerHTML = `<span style="color: #3b82f6;">⏳ Step ${stepNum}/${totalSteps}: Analyzing estimation document...</span>`;
+                    await runCombinedTranslationTimed();
+                    stepNum++;
+                    
+                    // Extract hints from translation result
+                    if (lastTranslationResult) {
+                        const translationHints = extractDamagedParts(lastTranslationResult);
+                        damageHints = damageHints.concat(translationHints);
+                    }
+                }
+                
+                // Step B: Run vehicle info extraction BEFORE damage detection (gets damage_info.vehicle_damages)
+                if (selectedCombinedVehicleFile) {
+                    combinedAnalyzeStatus.innerHTML = `<span style="color: #3b82f6;">⏳ Step ${stepNum}/${totalSteps}: Extracting vehicle & damage info...</span>`;
+                    await runCombinedVehicleExtractionTimed();
+                    stepNum++;
+                    
+                    // Extract hints from vehicle info result (accident intimation forms)
+                    if (lastVehicleInfoResult) {
+                        const vehicleHints = extractDamagedParts(lastVehicleInfoResult);
+                        damageHints = damageHints.concat(vehicleHints);
+                    }
+                }
+                
+                // Remove duplicates from combined hints
+                const uniqueHints = [];
+                const seenParts = new Set();
+                for (const hint of damageHints) {
+                    const key = (hint.part || '').toLowerCase().trim();
+                    if (key && !seenParts.has(key)) {
+                        seenParts.add(key);
+                        uniqueHints.push(hint);
+                    }
+                }
+                
+                console.log('[Frontend] Combined damage hints for detection:', uniqueHints);
+                
+                // Step C: Run damage detection LAST with all collected hints
+                if (selectedCombinedDamageFile) {
+                    if (uniqueHints.length > 0) {
+                        combinedAnalyzeStatus.innerHTML = `<span style="color: #3b82f6;">⏳ Step ${stepNum}/${totalSteps}: Detecting damage (guided by ${uniqueHints.length} parts from documents)...</span>`;
+                    } else {
+                        combinedAnalyzeStatus.innerHTML = `<span style="color: #3b82f6;">⏳ Step ${stepNum}/${totalSteps}: Detecting damage...</span>`;
+                    }
+                    await runCombinedDamageDetectionTimed(uniqueHints.length > 0 ? uniqueHints : null);
+                }
+                
                 const totalTime = stopTimer();
                 combinedAnalyzeStatus.innerHTML = '<span style="color: #10b981;">✓ All analyses completed!</span>';
                 showTimeSummary(totalTime);
             } catch (error) {
                 stopTimer();
+                console.error('Analysis error:', error);
                 combinedAnalyzeStatus.innerHTML = '<span style="color: #ef4444;">⚠️ Some analyses encountered errors</span>';
             } finally {
                 combinedAnalyzeAllBtn.disabled = false;
@@ -1873,9 +2109,9 @@ HTML_TEMPLATE = '''
         }
         
         // Timed wrapper functions
-        async function runCombinedDamageDetectionTimed() {
+        async function runCombinedDamageDetectionTimed(damageHints = null) {
             const start = Date.now();
-            await runCombinedDamageDetection();
+            await runCombinedDamageDetection(damageHints);
             analysisTimes.damage = (Date.now() - start) / 1000;
         }
         
@@ -1913,7 +2149,7 @@ HTML_TEMPLATE = '''
             }
         });
         
-        async function runCombinedDamageDetection() {
+        async function runCombinedDamageDetection(damageHints = null) {
             if (!selectedCombinedDamageFile) return;
             
             combinedDamageResults.classList.remove('show');
@@ -1921,6 +2157,18 @@ HTML_TEMPLATE = '''
             
             const formData = new FormData();
             formData.append('file', selectedCombinedDamageFile);
+            
+            // Add selected detection provider
+            const selectedProvider = document.querySelector('input[name="detectionProvider"]:checked');
+            const provider = selectedProvider ? selectedProvider.value : 'openai';
+            formData.append('detection_provider', provider);
+            console.log('[Frontend] Using detection provider:', provider);
+            
+            // Add damage hints from estimation document if available
+            if (damageHints && damageHints.length > 0) {
+                formData.append('damage_hints', JSON.stringify(damageHints));
+                console.log('[Frontend] Sending damage hints to API:', damageHints);
+            }
             
             try {
                 const response = await fetch('/api/analyze', {
@@ -1945,6 +2193,44 @@ HTML_TEMPLATE = '''
         
         function displayCombinedDamageResults(data) {
             let html = '';
+            
+            // Show provider used
+            const provider = data.provider || 'Unknown';
+            let providerColor = provider.includes('Roboflow') ? '#06b6d4' : '#8b5cf6';
+            html += `<div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 15px; padding: 10px 15px; background: #1f2937; border-radius: 8px;">
+                <span style="color: #9ca3af; font-size: 0.85em;">Detection Provider:</span>
+                <span style="background: ${providerColor}; color: white; padding: 4px 12px; border-radius: 15px; font-size: 0.85em; font-weight: 500;">🤖 ${escapeHtml(provider)}</span>
+            </div>`;
+            
+            // Collect all hints from both translation and vehicle info
+            let allHints = [];
+            if (lastTranslationResult) {
+                allHints = allHints.concat(extractDamagedParts(lastTranslationResult));
+            }
+            if (lastVehicleInfoResult) {
+                allHints = allHints.concat(extractDamagedParts(lastVehicleInfoResult));
+            }
+            
+            // Remove duplicates
+            const uniqueHints = [];
+            const seen = new Set();
+            for (const hint of allHints) {
+                const key = (hint.part || '').toLowerCase().trim();
+                if (key && !seen.has(key)) {
+                    seen.add(key);
+                    uniqueHints.push(hint);
+                }
+            }
+            
+            // Show if detection was guided by documents
+            if (uniqueHints.length > 0) {
+                html += `<div style="background: linear-gradient(135deg, #1e3a5f 0%, #0f172a 100%); border: 1px solid #3b82f6; border-radius: 10px; padding: 12px 15px; margin-bottom: 15px;">
+                    <div style="color: #60a5fa; font-size: 0.85em; font-weight: 600; margin-bottom: 8px;">📋 Detection guided by document(s):</div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                        ${uniqueHints.map(h => `<span style="background: #1e40af; color: #93c5fd; padding: 4px 10px; border-radius: 15px; font-size: 0.8em;">${escapeHtml(h.part || h)}</span>`).join('')}
+                    </div>
+                </div>`;
+            }
             
             // Show annotated image (API returns 'annotated_url') or original image as fallback
             if (data.annotated_url) {
@@ -2070,6 +2356,9 @@ HTML_TEMPLATE = '''
                 if (data.error) {
                     combinedVehicleContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(data.error)}</div>`;
                 } else {
+                    // Store vehicle info result (contains damage_info.vehicle_damages)
+                    lastVehicleInfoResult = data;
+                    console.log('[Frontend] Vehicle info result stored for damage detection guidance');
                     displayCombinedVehicleResults(data);
                 }
             } catch (error) {
@@ -2325,6 +2614,9 @@ HTML_TEMPLATE = '''
                 if (data.error) {
                     combinedTranslateContent.innerHTML = `<div style="background: #fef2f2; color: #991b1b; padding: 20px; border-radius: 10px;">⚠️ Error: ${escapeHtml(data.error)}</div>`;
                 } else {
+                    // Store the translation result for cross-referencing with damage detection
+                    lastTranslationResult = data;
+                    console.log('[Frontend] Translation result stored for damage detection guidance');
                     displayCombinedTranslateResults(data);
                 }
             } catch (error) {
@@ -2441,6 +2733,19 @@ HTML_TEMPLATE = '''
         function formatComparisonResult(data, provider) {
             let html = '';
             const color = provider === 'google' ? '#4285f4' : '#10b981';
+            const providerName = provider === 'google' ? 'Google Cloud Vision + Translate' : 'OpenAI GPT-4 Vision';
+            
+            // Show processing pipeline info
+            html += `<div style="margin-bottom: 12px; padding: 10px; background: rgba(255,255,255,0.03); border-radius: 8px; font-size: 0.8em;">`;
+            if (provider === 'google') {
+                html += `<p style="margin: 3px 0; color: #9ca3af;">📷 OCR: <span style="color: #4285f4;">Google Vision API</span></p>`;
+                html += `<p style="margin: 3px 0; color: #9ca3af;">🌐 Translation: <span style="color: #4285f4;">Google Translate API</span></p>`;
+                html += `<p style="margin: 3px 0; color: #9ca3af;">🔧 Extraction: <span style="color: #fbbf24;">Pattern Matching</span></p>`;
+            } else {
+                html += `<p style="margin: 3px 0; color: #9ca3af;">📷 OCR + 🌐 Translation + 🔧 Extraction:</p>`;
+                html += `<p style="margin: 3px 0; color: #10b981;">All done by GPT-4 Vision (multimodal AI)</p>`;
+            }
+            html += `</div>`;
             
             if (data.source_language) {
                 html += `<p style="margin-bottom: 15px; color: #e5e7eb;">Language: <strong style="color: ${color};">${escapeHtml(data.source_language)}</strong></p>`;
@@ -2481,6 +2786,18 @@ HTML_TEMPLATE = '''
                 }
             } else {
                 html += '<p style="color: #9ca3af; text-align: center; padding: 20px;">No table data extracted</p>';
+            }
+            
+            // Show raw OCR text (collapsible) - THIS IS THE KEY DIFFERENCE
+            if (data.raw_ocr_text) {
+                const rawId = `rawOcr_${provider}_${Date.now()}`;
+                html += `<div style="margin-top: 15px; border-top: 1px solid #374151; padding-top: 15px;">`;
+                html += `<button onclick="document.getElementById('${rawId}').style.display = document.getElementById('${rawId}').style.display === 'none' ? 'block' : 'none'" 
+                    style="background: rgba(255,255,255,0.1); border: none; color: #9ca3af; padding: 8px 12px; border-radius: 6px; cursor: pointer; font-size: 0.85em; width: 100%; text-align: left;">
+                    📄 Raw OCR Text (Click to expand)
+                </button>`;
+                html += `<pre id="${rawId}" style="display: none; margin-top: 10px; background: #0f172a; padding: 12px; border-radius: 8px; font-size: 0.75em; color: #94a3b8; white-space: pre-wrap; max-height: 200px; overflow-y: auto; border: 1px solid #334155;">${escapeHtml(data.raw_ocr_text)}</pre>`;
+                html += `</div>`;
             }
             
             return html;
@@ -2888,6 +3205,26 @@ HTML_TEMPLATE = '''
                 </div>`;
             }
 
+            // Show raw OCR text (collapsible) - Shows what was actually extracted
+            if (data.raw_ocr_text) {
+                html += '<div style="margin-top: 20px; background: #1f2937; border-radius: 12px; padding: 15px;">';
+                html += '<h3 style="color: #9ca3af; margin-bottom: 10px; font-size: 1em; cursor: pointer; display: flex; align-items: center; gap: 8px;" onclick="toggleRawOcrText()">';
+                html += '<span>📄</span> Raw OCR Text <span style="font-size: 0.8em; color: #6b7280;">(Click to expand)</span>';
+                html += '</h3>';
+                html += `<pre id="rawOcrTextContent" style="display: none; background: #0f172a; padding: 15px; border-radius: 8px; font-size: 0.8em; overflow-x: auto; white-space: pre-wrap; color: #94a3b8; max-height: 300px; overflow-y: auto; border: 1px solid #334155;">${escapeHtml(data.raw_ocr_text)}</pre>`;
+                html += '</div>';
+            }
+            
+            // Show processing info
+            if (data.ocr_provider || data.translator || data.ai_processing) {
+                html += '<div style="margin-top: 15px; background: #1f2937; border-radius: 10px; padding: 12px 15px;">';
+                html += '<p style="color: #6b7280; font-size: 0.85em; margin: 0;">Processing Pipeline:</p>';
+                if (data.ocr_provider) html += `<p style="color: #9ca3af; font-size: 0.85em; margin: 5px 0 0 0;">📷 OCR: <strong style="color: #60a5fa;">${escapeHtml(data.ocr_provider)}</strong></p>`;
+                if (data.translator) html += `<p style="color: #9ca3af; font-size: 0.85em; margin: 5px 0 0 0;">🌐 Translation: <strong style="color: #60a5fa;">${escapeHtml(data.translator)}</strong></p>`;
+                if (data.ai_processing) html += `<p style="color: #9ca3af; font-size: 0.85em; margin: 5px 0 0 0;">🔧 Extraction: <strong style="color: #fbbf24;">${escapeHtml(data.ai_processing)}</strong></p>`;
+                html += '</div>';
+            }
+
             // Show raw API response for debugging (can be removed in production)
             if (data.raw_response) {
                 html += '<div style="margin-top: 20px;">';
@@ -2898,6 +3235,13 @@ HTML_TEMPLATE = '''
 
             translationContent.innerHTML = html;
             translationResults.classList.add('show');
+        }
+        
+        function toggleRawOcrText() {
+            const el = document.getElementById('rawOcrTextContent');
+            if (el) {
+                el.style.display = el.style.display === 'none' ? 'block' : 'none';
+            }
         }
 
         function toggleRawApiResponse() {
@@ -3537,8 +3881,82 @@ def analyze():
         # Only enable cost estimation when all three fields are provided
         has_vehicle_info = bool(vehicle_make and vehicle_year is not None and vehicle_variant)
         
-        # Analyze the file - get report, annotated path, and structured damages list
-        report, annotated_path, damages_list = analyze_vehicle_damage(filepath, is_video=is_video, multi_frame=False)
+        # Get damage hints from estimation document (optional)
+        # These are the damaged parts identified in the insurance document
+        damage_hints = None
+        damage_hints_json = request.form.get('damage_hints', '').strip()
+        if damage_hints_json:
+            try:
+                damage_hints = json.loads(damage_hints_json)
+                print(f"[API] Received {len(damage_hints)} damage hints from estimation document")
+            except json.JSONDecodeError:
+                print("[API] Warning: Could not parse damage_hints JSON")
+                damage_hints = None
+        
+        # Get detection provider (openai or roboflow)
+        detection_provider = request.form.get('detection_provider', 'openai').strip().lower()
+        print(f"[API] Using detection provider: {detection_provider}")
+        
+        # Initialize variables
+        report = None
+        annotated_path = None
+        damages_list = []
+        provider_used = 'OpenAI GPT-4o'
+        
+        # Use Roboflow if selected and available
+        # Check dynamically for current environment state
+        roboflow_ready = False
+        try:
+            from roboflow import Roboflow
+            roboflow_ready = bool(os.environ.get('ROBOFLOW_API_KEY'))
+        except ImportError:
+            pass
+        
+        if detection_provider == 'roboflow':
+            if roboflow_ready:
+                print("[API] Using Roboflow for damage detection")
+                provider_used = 'Roboflow'
+                try:
+                    roboflow_result = detect_damage_roboflow(filepath)
+                    if roboflow_result.get('success'):
+                        damages_list = roboflow_result.get('damages', [])
+                        report = f"DAMAGE FOUND: {'Yes' if damages_list else 'No'}\n\n"
+                        report += f"Provider: Roboflow\n"
+                        report += f"Model: {roboflow_result.get('model', 'car-damage-detection')}\n\n"
+                        for i, d in enumerate(damages_list, 1):
+                            report += f"---\nDAMAGE {i}:\n"
+                            report += f"- Location: {d.get('location', 'Detected area')}\n"
+                            report += f"- Type: {d.get('label', 'Damage')}\n"
+                            report += f"- Confidence: {d.get('confidence', 0):.1f}%\n"
+                            report += f"- Extent: {d.get('extent', 'Unknown')}\n"
+                        
+                        # Draw boxes on image if damages found
+                        if damages_list and CV2_AVAILABLE:
+                            from openai_gpt_vision import draw_damage_boxes
+                            annotated_path = draw_damage_boxes(filepath, damages_list)
+                    else:
+                        # Roboflow failed, fall back to OpenAI
+                        print(f"[API] Roboflow error: {roboflow_result.get('error')}, falling back to OpenAI")
+                        detection_provider = 'openai'
+                except Exception as e:
+                    print(f"[API] Roboflow exception: {e}, falling back to OpenAI")
+                    detection_provider = 'openai'
+            else:
+                print("[API] Roboflow not available/configured, falling back to OpenAI")
+                detection_provider = 'openai'
+        
+        # Use OpenAI if selected or as fallback
+        if detection_provider == 'openai' or not damages_list:
+            print("[API] Using OpenAI GPT-4o for damage detection")
+            provider_used = 'OpenAI GPT-4o'
+            # Analyze the file - get report, annotated path, and structured damages list
+            # Pass damage_hints to guide the detection based on estimation document
+            report, annotated_path, damages_list = analyze_vehicle_damage(
+                filepath, 
+                is_video=is_video, 
+                multi_frame=False,
+                damage_hints=damage_hints
+            )
         
         # Use damages_list from bounding boxes as source of truth (ensures annotations match results)
         if damages_list and len(damages_list) > 0:
@@ -3624,7 +4042,8 @@ def analyze():
         # Prepare response
         response_data = {
             'parsed': parsed,
-            'raw_report': report
+            'raw_report': report,
+            'provider': provider_used
         }
         
         # Add preview URL
@@ -4158,12 +4577,21 @@ Validity: 30 days from date of issue
         is_image = file_ext in {'png', 'jpg', 'jpeg', 'tiff', 'tif'}
         is_pdf = file_ext == 'pdf'
         
-        # Document Translation ALWAYS uses Google Vision OCR (when available)
-        # This is separate from Vehicle Info Extraction which uses GPT-4
-        use_google = GOOGLE_VISION_HELPER_AVAILABLE
-        print(f"DEBUG: Document Translation - Using {'Google Vision OCR' if use_google else 'OpenAI GPT-4'}")
+        # Get selected provider from request (default to 'google' if available)
+        selected_provider = request.form.get('provider', 'auto').lower()
+        
+        # Determine which provider to use
+        if selected_provider == 'openai':
+            use_google = False  # User explicitly requested OpenAI
+        elif selected_provider == 'google':
+            use_google = GOOGLE_VISION_HELPER_AVAILABLE  # User requested Google
+        else:  # 'auto' or not specified
+            use_google = GOOGLE_VISION_HELPER_AVAILABLE  # Default to Google if available
+        
+        print(f"DEBUG: Document Translation - Provider requested: {selected_provider}, Using: {'Google Vision (Pure)' if use_google else 'OpenAI GPT-4 Vision'}")
         
         # === GOOGLE CLOUD VISION API (Primary for Translation) ===
+        # Now uses PURE Google: Vision OCR + Translate API (NO GPT)
         if use_google:
             try:
                 if is_image:
@@ -4175,8 +4603,12 @@ Validity: 30 days from date of issue
                         'source_language': result.get('source_language', 'Unknown'),
                         'document_info': result.get('document_info', {}),
                         'totals': result.get('totals', {}),
-                        'provider': 'Google Cloud Vision API + GPT',
-                        'confidence': 0.9
+                        'raw_ocr_text': result.get('raw_ocr_text', ''),
+                        'ocr_provider': result.get('ocr_provider', 'Google Cloud Vision API'),
+                        'translator': result.get('translator', 'Google Cloud Translate API'),
+                        'ai_processing': result.get('ai_processing', 'Pattern Matching (No AI)'),
+                        'provider': 'Google Cloud Vision + Translate (Pure)',
+                        'confidence': 0.85
                     })
                 elif is_pdf:
                     # Handle PDF with Google Cloud
@@ -4499,7 +4931,14 @@ NEVER SUMMARIZE INTO GENERIC CATEGORIES. Extract each line item separately."""
                         'success': True,
                         'translated_text': result.get('translated_text', ''),
                         'source_language': result.get('source_language', 'Unknown'),
-                        'confidence': 0.9
+                        'confidence': 0.9,
+                        # Processing pipeline info for OpenAI
+                        'ocr_provider': 'OpenAI GPT-4 Vision (Multimodal)',
+                        'translator': 'OpenAI GPT-4 Vision (Built-in)',
+                        'ai_processing': 'GPT-4 Vision (AI-powered extraction)',
+                        'provider': 'OpenAI GPT-4 Vision',
+                        # Raw OCR text - for OpenAI this is what GPT interpreted from the image
+                        'raw_ocr_text': f"[GPT-4 Vision directly analyzed the image - no separate OCR step]\n\nExtracted content:\n{result.get('translated_text', result_text)}"
                     }
                     
                     # Include table_data if available (new format)
@@ -5188,12 +5627,24 @@ def translation_config():
     if pdf_support:
         supported.insert(0, 'pdf')
     
+    # Check Roboflow status - check dynamically for current env state
+    roboflow_available = False
+    roboflow_configured = False
+    try:
+        from roboflow import Roboflow
+        roboflow_available = True
+        roboflow_configured = bool(os.environ.get('ROBOFLOW_API_KEY'))
+    except ImportError:
+        pass
+    
+    
     return jsonify({
         'feature_providers': {
             'damage_detection': {
-                'provider': 'OpenAI GPT-4 Vision',
+                'provider': 'OpenAI GPT-4o + Roboflow (selectable)',
                 'configured': openai_configured,
-                'description': 'Always uses GPT-4 Vision for damage analysis'
+                'roboflow_available': roboflow_configured,
+                'description': 'Choose between OpenAI GPT-4o or Roboflow for damage analysis'
             },
             'vehicle_info_extraction': {
                 'provider': 'OpenAI GPT-4 Vision',
@@ -5208,8 +5659,14 @@ def translation_config():
         },
         'providers_status': {
             'openai': {
-                'name': 'OpenAI GPT-4 Vision',
+                'name': 'OpenAI GPT-4o',
                 'configured': openai_configured
+            },
+            'roboflow': {
+                'name': 'Roboflow (Object Detection)',
+                'configured': roboflow_configured,
+                'available': roboflow_available,
+                'setup_hint': 'Set ROBOFLOW_API_KEY environment variable' if not roboflow_configured else None
             },
             'google': {
                 'name': 'Google Cloud Vision + Translate',

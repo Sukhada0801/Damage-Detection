@@ -74,15 +74,24 @@ except Exception as e:
     sys.exit(1)
 
 # Model Configuration
-# GPT-4o-2024-11-20 is the latest GPT-4 Omni snapshot with improved accuracy
-# It provides superior accuracy for damage detection and can handle multiple damages effectively
-# Alternative models: "gpt-4o", "gpt-4o-mini" (faster/cheaper), "o1-preview" (advanced reasoning)
-GPT_MODEL = "gpt-4o-2024-11-20"  # Latest GPT-4 Omni snapshot for best accuracy
+# Available models for vision tasks (in order of capability):
+#   1. "gpt-4o" - Latest GPT-4 Omni (auto-updates to newest version)
+#   2. "gpt-4o-2024-11-20" - Specific snapshot with consistent behavior
+#   3. "gpt-4o-mini" - Faster and cheaper, slightly less accurate
+#   4. "chatgpt-4o-latest" - ChatGPT's latest model version
+#
+# NOTE: o1/o1-preview models have limited vision support and different API parameters
+# For best damage detection accuracy, use gpt-4o or its snapshots
+
+# You can change this to try different models
+GPT_MODEL = os.environ.get('OPENAI_MODEL', 'gpt-4o')  # Default to latest gpt-4o
 IMAGE_DETAIL = "high"  # Use high detail for better damage detection accuracy
 MAX_TOKENS_BOXES = 4000  # Increased for multiple damage descriptions
 MAX_TOKENS_REPORT = 2000  # Increased to handle multiple damages
 TEMPERATURE = 0.1  # Low temperature for consistent, precise results
 TOP_P = 0.95  # Nucleus sampling for better quality
+
+print(f"[OpenAI] Using model: {GPT_MODEL}")
 
 # Simple Damage Assessment Prompt - Enhanced for comprehensive detection
 SIMPLE_DAMAGE_PROMPT = """You are an expert vehicle damage inspector. Analyze this vehicle image THOROUGHLY and identify ALL visible damage.
@@ -130,9 +139,30 @@ NO DAMAGE DETECTED - Vehicle appears to be in good condition."""
 # Prompt to get bounding box coordinates for damage highlighting - tuned for generous, human-correctable boxes
 BOUNDING_BOX_PROMPT = """You are a precise damage localization expert. Analyze this vehicle image SYSTEMATICALLY and provide COMPLETE bounding box coordinates that fully encompass EACH AND EVERY visible damage area.
 
+🚨 CRITICAL INSPECTION CHECKLIST - CHECK THESE AREAS FIRST:
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+1. BUMPERS (front & rear) - Most commonly damaged! Look for:
+   - Crushed/pushed-in sections
+   - Cracked plastic
+   - Misalignment with body
+   - Missing pieces
+2. CORNERS (all 4) - Second most common:
+   - Front left corner (fender + bumper junction)
+   - Front right corner
+   - Rear left corner
+   - Rear right corner
+3. FENDERS - Check for dents, creases, pushed-in metal
+4. HOOD - Dents, creases, paint damage
+5. DOORS - Dents, scratches, dings
+6. LIGHTS - Cracked, broken, misaligned headlights/taillights
+7. GRILLE - Broken, missing pieces
+8. MIRRORS - Cracked, missing, damaged
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 PRIMARY GOAL:
 - Draw boxes that COMPLETELY COVER the full damaged region, even if the box is slightly larger than necessary.
 - It is MUCH BETTER for a box to be TOO LARGE (but tightly centered on the damage) than to cut off any part of the damage.
+- PAY SPECIAL ATTENTION TO BUMPERS AND CORNERS - these are often missed!
 
 CRITICAL: You MUST identify ALL distinct damages in the image. If there are 2 damages, return 2 boxes. If there are 3 damages, return 3 boxes. Do not miss any damage areas.
 
@@ -321,7 +351,7 @@ def get_mime_type(file_path):
     return mime_types.get(ext, 'image/jpeg')
 
 
-def analyze_vehicle_damage(file_path, is_video=False, multi_frame=False):
+def analyze_vehicle_damage(file_path, is_video=False, multi_frame=False, damage_hints=None):
     """
     Analyze a vehicle image or video for damage assessment.
     
@@ -329,6 +359,8 @@ def analyze_vehicle_damage(file_path, is_video=False, multi_frame=False):
         file_path (str): Path to the image or video file
         is_video (bool): Whether the file is a video
         multi_frame (bool): For videos, analyze multiple frames
+        damage_hints (list): Optional list of damaged parts/areas from estimation document.
+                            If provided, helps guide the model to focus on these specific areas.
         
     Returns:
         Tuple of (report_text, annotated_image_path, damages_list)
@@ -338,6 +370,9 @@ def analyze_vehicle_damage(file_path, is_video=False, multi_frame=False):
     
     temp_frames = []
     annotated_path = None
+    
+    if damage_hints:
+        print(f"[Damage Detection] Received {len(damage_hints)} damage hints from estimation document")
     
     try:
         if is_video:
@@ -354,7 +389,7 @@ def analyze_vehicle_damage(file_path, is_video=False, multi_frame=False):
                 all_analyses = []
                 for i, frame_path in enumerate(temp_frames):
                     print(f"  Analyzing frame {i+1}/{len(temp_frames)}...")
-                    analysis, _, _ = _analyze_single_image(frame_path, highlight_damage=False)
+                    analysis, _, _ = _analyze_single_image(frame_path, highlight_damage=False, damage_hints=damage_hints)
                     all_analyses.append(f"### Frame {i+1} Analysis:\n{analysis}")
                 
                 combined = "\n\n" + "="*70 + "\n\n".join(all_analyses)
@@ -365,10 +400,10 @@ def analyze_vehicle_damage(file_path, is_video=False, multi_frame=False):
                 if not frame_path:
                     return "Error: Could not extract frame from video.", None, []
                 temp_frames.append(frame_path)
-                report, annotated_path, damages_list = _analyze_single_image(frame_path)
+                report, annotated_path, damages_list = _analyze_single_image(frame_path, damage_hints=damage_hints)
                 return report, annotated_path, damages_list
         else:
-            report, annotated_path, damages_list = _analyze_single_image(file_path)
+            report, annotated_path, damages_list = _analyze_single_image(file_path, damage_hints=damage_hints)
             return report, annotated_path, damages_list
             
     finally:
@@ -522,10 +557,15 @@ def draw_damage_boxes(image_path, damages, output_path=None):
         return None
 
 
-def get_damage_boxes(image_path):
+def get_damage_boxes(image_path, damage_hints=None):
     """
     Get bounding box coordinates for damage areas from GPT-4 Vision.
     Includes validation and expansion to ensure complete coverage.
+    
+    Args:
+        image_path: Path to the image file
+        damage_hints: Optional list of damaged parts/areas from estimation document.
+                     If provided, the model will focus on finding damage in these areas.
     
     Returns:
         List of damage dictionaries with bounding box info
@@ -533,6 +573,47 @@ def get_damage_boxes(image_path):
     try:
         image_data = encode_image(image_path)
         mime_type = get_mime_type(image_path)
+        
+        # Build the prompt - add damage hints if provided
+        prompt = BOUNDING_BOX_PROMPT
+        
+        if damage_hints and len(damage_hints) > 0:
+            hints_text = "\n\n" + "=" * 70 + "\n"
+            hints_text += "🚨 MANDATORY: DAMAGE AREAS FROM INSURANCE ESTIMATION DOCUMENT\n"
+            hints_text += "=" * 70 + "\n"
+            hints_text += "The insurance estimation document has identified these SPECIFIC damaged parts.\n"
+            hints_text += "You MUST create a bounding box for EACH of these areas:\n\n"
+            
+            for i, hint in enumerate(damage_hints, 1):
+                if isinstance(hint, dict):
+                    part = hint.get('part', hint.get('description', str(hint)))
+                    damage_type = hint.get('type', hint.get('damage_type', ''))
+                    if damage_type:
+                        hints_text += f"  📍 REQUIRED BOX {i}: {part} ({damage_type})\n"
+                    else:
+                        hints_text += f"  📍 REQUIRED BOX {i}: {part}\n"
+                else:
+                    hints_text += f"  📍 REQUIRED BOX {i}: {hint}\n"
+            
+            hints_text += "\n" + "⚠️" * 10 + " CRITICAL REQUIREMENTS " + "⚠️" * 10 + "\n"
+            hints_text += "1. CREATE A BOUNDING BOX FOR EACH ITEM LISTED ABOVE - This is MANDATORY\n"
+            hints_text += "2. The 'location' field in your JSON MUST use the EXACT part name from the document\n"
+            hints_text += "   - If document says 'FRONT LHS - BUFFER', use 'FRONT LHS - BUFFER' as location\n"
+            hints_text += "   - If document says 'Front Bumper', use 'Front Bumper' as location\n"
+            hints_text += "3. 'Buffer' = 'Bumper' (same part, different terminology)\n"
+            hints_text += "4. 'LHS' = Left Hand Side, 'RHS' = Right Hand Side\n"
+            hints_text += "5. Look at the FRONT BUMPER area specifically if 'buffer' is mentioned\n"
+            hints_text += "6. You may also detect additional damages visible but not in the document\n"
+            hints_text += "7. MINIMUM BOXES: You must return at least " + str(len(damage_hints)) + " boxes\n"
+            hints_text += "=" * 70 + "\n"
+            
+            prompt = prompt + hints_text
+            print(f"[Damage Detection] Using {len(damage_hints)} damage hints from estimation document")
+            for hint in damage_hints:
+                if isinstance(hint, dict):
+                    print(f"  - {hint.get('part', hint.get('description', str(hint)))}")
+                else:
+                    print(f"  - {hint}")
         
         # Use optimized parameters for maximum accuracy in damage detection
         response = client.chat.completions.create(
@@ -543,7 +624,7 @@ def get_damage_boxes(image_path):
                     "content": [
                         {
                             "type": "text",
-                            "text": BOUNDING_BOX_PROMPT
+                            "text": prompt
                         },
                         {
                             "type": "image_url",
@@ -632,13 +713,14 @@ def get_damage_boxes(image_path):
         return []
 
 
-def _analyze_single_image(image_path, highlight_damage=True):
+def _analyze_single_image(image_path, highlight_damage=True, damage_hints=None):
     """
     Analyze a single image for vehicle damage.
     
     Args:
         image_path: Path to the image file
         highlight_damage: Whether to create annotated image with damage boxes
+        damage_hints: Optional list of damaged parts/areas from estimation document
     
     Returns:
         Tuple of (report_text, annotated_image_path, damages_list) where damages_list contains structured damage data
@@ -653,7 +735,7 @@ def _analyze_single_image(image_path, highlight_damage=True):
         # Get damage boxes FIRST - this will be our source of truth for damage count and details
         if highlight_damage and VIDEO_SUPPORT:
             print("Detecting damage locations and details...")
-            damages_list = get_damage_boxes(image_path)
+            damages_list = get_damage_boxes(image_path, damage_hints=damage_hints)
             
             if damages_list:
                 print(f"Found {len(damages_list)} damage area(s). Creating annotated image...")
@@ -663,34 +745,58 @@ def _analyze_single_image(image_path, highlight_damage=True):
             else:
                 print("No damage areas detected.")
         
-        # Get text report for additional context (but damages_list is the source of truth)
-        # Using optimized parameters for comprehensive damage detection
-        response = client.chat.completions.create(
-            model=GPT_MODEL,
-            messages=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": SIMPLE_DAMAGE_PROMPT
-                        },
-                        {
-                            "type": "image_url",
-                            "image_url": {
-                                "url": f"data:{mime_type};base64,{image_data}",
-                                "detail": IMAGE_DETAIL
+        # Generate text report - either from bounding boxes (for consistency) or from prompt
+        if damages_list and len(damages_list) > 0:
+            # Generate report FROM the bounding box results for consistency
+            report = "DAMAGE FOUND: Yes\n\n"
+            for i, damage in enumerate(damages_list, 1):
+                report += "---\n"
+                report += f"DAMAGE {i}:\n"
+                report += f"- Location: {damage.get('location', 'Not specified')}\n"
+                report += f"- Type: {damage.get('label', 'Unknown')}\n"
+                report += f"- Extent: {damage.get('extent', 'Unknown')}\n"
+            report += "---"
+        else:
+            # Fallback: Get text report from separate API call
+            # Include damage hints if available for consistency
+            text_prompt = SIMPLE_DAMAGE_PROMPT
+            if damage_hints and len(damage_hints) > 0:
+                hints_text = "\n\nIMPORTANT: The insurance document mentions these damaged areas:\n"
+                for hint in damage_hints:
+                    if isinstance(hint, dict):
+                        part = hint.get('part', hint.get('description', str(hint)))
+                        hints_text += f"- {part}\n"
+                    else:
+                        hints_text += f"- {hint}\n"
+                hints_text += "\nFocus on identifying damage in these specific areas."
+                text_prompt = text_prompt + hints_text
+            
+            response = client.chat.completions.create(
+                model=GPT_MODEL,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": text_prompt
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": f"data:{mime_type};base64,{image_data}",
+                                    "detail": IMAGE_DETAIL
+                                }
                             }
-                        }
-                    ]
-                }
-            ],
-            max_tokens=MAX_TOKENS_REPORT,
-            temperature=TEMPERATURE,
-            top_p=TOP_P
-        )
-        
-        report = response.choices[0].message.content
+                        ]
+                    }
+                ],
+                max_tokens=MAX_TOKENS_REPORT,
+                temperature=TEMPERATURE,
+                top_p=TOP_P
+            )
+            
+            report = response.choices[0].message.content
         
         return report, annotated_path, damages_list
         

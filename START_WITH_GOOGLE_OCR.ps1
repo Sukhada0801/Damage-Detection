@@ -29,3 +29,7 @@ cd "C:\Car Damage Detection Project"
 python frontend_damage_detection
 
 
+
+
+
+
